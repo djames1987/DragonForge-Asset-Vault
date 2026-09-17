@@ -283,7 +283,7 @@ async fn download_asset(
         .original_filename
         .replace(['', '
 ', '"'], "_");
-    let disposition = format!("attachment; filename="{}"", safe_filename);
+    let disposition = format!("attachment; filename=\\\"{}\\\"", safe_filename);
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&disposition)
