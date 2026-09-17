@@ -1,0 +1,282 @@
+use crate::{error::{AppError, AppResult}, models::{Asset, AssetQuery, AssetRow, StatsResponse, UpdateAssetRequest}};
+use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
+use std::{path::Path, str::FromStr};
+
+pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+
+    initialize(&pool).await?;
+    Ok(pool)
+}
+
+async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS assets (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            extension TEXT,
+            mime_type TEXT,
+            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+            sha256 TEXT NOT NULL UNIQUE,
+            storage_path TEXT NOT NULL,
+            category TEXT,
+            description TEXT,
+            source_url TEXT,
+            creator TEXT,
+            license TEXT,
+            attribution_required INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_tags (
+            asset_id TEXT NOT NULL,
+            tag TEXT NOT NULL COLLATE NOCASE,
+            PRIMARY KEY(asset_id, tag),
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category);
+        CREATE INDEX IF NOT EXISTS idx_assets_created_at ON assets(created_at);
+        CREATE INDEX IF NOT EXISTS idx_assets_deleted_at ON assets(deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_asset(pool: &SqlitePool, id: &str, include_deleted: bool) -> AppResult<Asset> {
+    let row = sqlx::query_as::<_, AssetRow>(
+        r#"SELECT * FROM assets WHERE id = ? AND (? OR deleted_at IS NULL)"#,
+    )
+    .bind(id)
+    .bind(include_deleted)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    hydrate(pool, row).await
+}
+
+pub async fn get_asset_by_hash(pool: &SqlitePool, hash: &str) -> AppResult<Option<Asset>> {
+    let row = sqlx::query_as::<_, AssetRow>("SELECT * FROM assets WHERE sha256 = ?")
+        .bind(hash)
+        .fetch_optional(pool)
+        .await?;
+
+    match row {
+        Some(row) => Ok(Some(hydrate(pool, row).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn list_assets(pool: &SqlitePool, query: &AssetQuery) -> AppResult<Vec<Asset>> {
+    let q = query.q.as_ref().map(|v| format!("%{}%", v.trim()));
+    let tag = query.tag.as_ref().map(|v| v.trim().to_string());
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let offset = query.offset.unwrap_or(0).max(0);
+
+    let rows = sqlx::query_as::<_, AssetRow>(
+        r#"
+        SELECT a.*
+        FROM assets a
+        WHERE (?1 OR a.deleted_at IS NULL)
+          AND (?2 IS NULL OR a.category = ?2 COLLATE NOCASE)
+          AND (
+                ?3 IS NULL
+                OR a.name LIKE ?3
+                OR a.original_filename LIKE ?3
+                OR COALESCE(a.description, '') LIKE ?3
+                OR COALESCE(a.creator, '') LIKE ?3
+                OR COALESCE(a.license, '') LIKE ?3
+              )
+          AND (
+                ?4 IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM asset_tags t
+                    WHERE t.asset_id = a.id AND t.tag = ?4 COLLATE NOCASE
+                )
+              )
+        ORDER BY a.created_at DESC
+        LIMIT ?5 OFFSET ?6
+        "#,
+    )
+    .bind(query.include_deleted)
+    .bind(query.category.as_deref())
+    .bind(q.as_deref())
+    .bind(tag.as_deref())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let mut assets = Vec::with_capacity(rows.len());
+    for row in rows {
+        assets.push(hydrate(pool, row).await?);
+    }
+    Ok(assets)
+}
+
+pub async fn insert_asset(pool: &SqlitePool, row: &AssetRow, tags: &[String]) -> AppResult<Asset> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO assets (
+            id, name, original_filename, extension, mime_type, byte_size, sha256,
+            storage_path, category, description, source_url, creator, license,
+            attribution_required, created_at, updated_at, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&row.id)
+    .bind(&row.name)
+    .bind(&row.original_filename)
+    .bind(&row.extension)
+    .bind(&row.mime_type)
+    .bind(row.byte_size)
+    .bind(&row.sha256)
+    .bind(&row.storage_path)
+    .bind(&row.category)
+    .bind(&row.description)
+    .bind(&row.source_url)
+    .bind(&row.creator)
+    .bind(&row.license)
+    .bind(row.attribution_required)
+    .bind(&row.created_at)
+    .bind(&row.updated_at)
+    .bind(&row.deleted_at)
+    .execute(&mut *tx)
+    .await?;
+
+    replace_tags_tx(&mut tx, &row.id, tags).await?;
+    tx.commit().await?;
+    get_asset(pool, &row.id, true).await
+}
+
+pub async fn update_asset(pool: &SqlitePool, id: &str, req: UpdateAssetRequest) -> AppResult<Asset> {
+    let current = get_asset(pool, id, true).await?;
+    if current.row.deleted_at.is_some() {
+        return Err(AppError::Conflict("deleted assets cannot be edited until restored in a future version".to_string()));
+    }
+
+    let name = req.name.unwrap_or(current.row.name);
+    if name.trim().is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".to_string()));
+    }
+
+    let category = req.category.or(current.row.category);
+    let description = req.description.or(current.row.description);
+    let source_url = req.source_url.or(current.row.source_url);
+    let creator = req.creator.or(current.row.creator);
+    let license = req.license.or(current.row.license);
+    let attribution_required = req.attribution_required.unwrap_or(current.row.attribution_required);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE assets SET
+            name = ?, category = ?, description = ?, source_url = ?, creator = ?,
+            license = ?, attribution_required = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(name.trim())
+    .bind(category.as_deref())
+    .bind(description.as_deref())
+    .bind(source_url.as_deref())
+    .bind(creator.as_deref())
+    .bind(license.as_deref())
+    .bind(attribution_required)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(tags) = req.tags {
+        replace_tags_tx(&mut tx, id, &tags).await?;
+    }
+
+    tx.commit().await?;
+    get_asset(pool, id, true).await
+}
+
+pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query("UPDATE assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL")
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn stats(pool: &SqlitePool) -> AppResult<StatsResponse> {
+    let active_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL")
+        .fetch_one(pool).await?;
+    let deleted_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NOT NULL")
+        .fetch_one(pool).await?;
+    let total_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(byte_size), 0) FROM assets WHERE deleted_at IS NULL")
+        .fetch_one(pool).await?;
+    let unique_tags: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT tag) FROM asset_tags")
+        .fetch_one(pool).await?;
+
+    Ok(StatsResponse { active_assets, deleted_assets, total_bytes, unique_tags })
+}
+
+async fn hydrate(pool: &SqlitePool, row: AssetRow) -> AppResult<Asset> {
+    let tags = sqlx::query_scalar::<_, String>("SELECT tag FROM asset_tags WHERE asset_id = ? ORDER BY tag COLLATE NOCASE")
+        .bind(&row.id)
+        .fetch_all(pool)
+        .await?;
+    Ok(Asset { row, tags })
+}
+
+async fn replace_tags_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    asset_id: &str,
+    tags: &[String],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM asset_tags WHERE asset_id = ?")
+        .bind(asset_id)
+        .execute(&mut **tx)
+        .await?;
+
+    let mut normalized = tags.iter()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+
+    for tag in normalized {
+        sqlx::query("INSERT INTO asset_tags(asset_id, tag) VALUES(?, ?)")
+            .bind(asset_id)
+            .bind(tag)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
