@@ -1,6 +1,6 @@
 [package]
 name = "dragonforge-asset-vault"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "LAN-first game asset storage vault"
 license = "MIT"
@@ -11,6 +11,7 @@ axum = { version = "0.7", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 eframe = "0.31"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "multipart", "stream"] }
 rfd = "0.15"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +24,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 toml = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
