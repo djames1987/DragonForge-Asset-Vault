@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let _log_guard = logging::init_file_logging(
         &log_dir,
         "server.log",
-        "dragonforge_asset_vault=info,tower_http=info",
+        "dragonforge_server=info,tower_http=info",
     )?;
 
     info!(
