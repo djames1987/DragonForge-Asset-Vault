@@ -9,15 +9,23 @@ pub struct Storage {
     root: PathBuf,
     assets_dir: PathBuf,
     temp_dir: PathBuf,
+    previews_dir: PathBuf,
 }
 
 impl Storage {
     pub async fn new(root: PathBuf) -> anyhow::Result<Self> {
         let assets_dir = root.join("assets");
         let temp_dir = root.join("temp");
+        let previews_dir = root.join("previews");
         fs::create_dir_all(&assets_dir).await?;
         fs::create_dir_all(&temp_dir).await?;
-        Ok(Self { root, assets_dir, temp_dir })
+        fs::create_dir_all(&previews_dir).await?;
+        Ok(Self {
+            root,
+            assets_dir,
+            temp_dir,
+            previews_dir,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -39,22 +47,39 @@ impl Storage {
         self.assets_dir.join(first).join(second).join(filename)
     }
 
+    pub fn thumbnail_path(&self, sha256: &str) -> PathBuf {
+        let first = &sha256[0..2];
+        let second = &sha256[2..4];
+        self.previews_dir
+            .join(first)
+            .join(second)
+            .join(format!("{sha256}.png"))
+    }
+
     pub fn relative_path(&self, full_path: &Path) -> AppResult<String> {
         full_path
             .strip_prefix(&self.root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .map_err(|_| AppError::BadRequest("asset path is outside configured vault storage".to_string()))
+            .map_err(|_| {
+                AppError::BadRequest(
+                    "asset path is outside configured vault storage".to_string(),
+                )
+            })
     }
 
     pub fn resolve_relative(&self, relative: &str) -> AppResult<PathBuf> {
-        let candidate = self.root.join(relative);
         if relative.contains("..") {
             return Err(AppError::BadRequest("invalid storage path".to_string()));
         }
-        Ok(candidate)
+        Ok(self.root.join(relative))
     }
 
-    pub async fn commit_temp(&self, temp_path: &Path, sha256: &str, extension: Option<&str>) -> AppResult<PathBuf> {
+    pub async fn commit_temp(
+        &self,
+        temp_path: &Path,
+        sha256: &str,
+        extension: Option<&str>,
+    ) -> AppResult<PathBuf> {
         let final_path = self.final_path(sha256, extension);
         if let Some(parent) = final_path.parent() {
             fs::create_dir_all(parent).await?;
@@ -98,6 +123,12 @@ pub async fn stream_field_to_temp(
         .map(|v| v.to_lowercase());
 
     let temp_path = storage.temp_path();
+    tracing::info!(
+        filename = %original_filename,
+        temp_path = %temp_path.display(),
+        "upload stream started"
+    );
+
     let mut output = fs::File::create(&temp_path).await?;
     let mut hasher = Sha256::new();
     let mut byte_size: i64 = 0;
@@ -114,8 +145,17 @@ pub async fn stream_field_to_temp(
 
     if byte_size == 0 {
         storage.remove_temp(&temp_path).await;
+        tracing::warn!(filename = %original_filename, "empty upload rejected");
         return Err(AppError::BadRequest("uploaded file is empty".to_string()));
     }
+
+    let sha256 = hex::encode(hasher.finalize());
+    tracing::info!(
+        filename = %original_filename,
+        byte_size,
+        sha256 = %sha256,
+        "upload stream completed"
+    );
 
     Ok(IncomingFile {
         temp_path,
@@ -123,6 +163,6 @@ pub async fn stream_field_to_temp(
         extension,
         mime_type,
         byte_size,
-        sha256: hex::encode(hasher.finalize()),
+        sha256,
     })
 }
