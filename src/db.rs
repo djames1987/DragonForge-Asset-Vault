@@ -1,13 +1,20 @@
-use crate::{error::{AppError, AppResult}, models::{Asset, AssetQuery, AssetRow, StatsResponse, UpdateAssetRequest}};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
-use std::{path::Path, str::FromStr};
+use crate::{
+    error::{AppError, AppResult},
+    models::{Asset, AssetQuery, AssetRow, StatsResponse, UpdateAssetRequest},
+};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
+use std::path::Path;
 
 pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+    let options = SqliteConnectOptions::new()
+        .filename(path)
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
@@ -22,7 +29,7 @@ pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
 }
 
 async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::query(
+    const STATEMENTS: &[&str] = &[
         r#"
         CREATE TABLE IF NOT EXISTS assets (
             id TEXT PRIMARY KEY NOT NULL,
@@ -42,23 +49,26 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             deleted_at TEXT
-        );
-
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS asset_tags (
             asset_id TEXT NOT NULL,
             tag TEXT NOT NULL COLLATE NOCASE,
             PRIMARY KEY(asset_id, tag),
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category);
-        CREATE INDEX IF NOT EXISTS idx_assets_created_at ON assets(created_at);
-        CREATE INDEX IF NOT EXISTS idx_assets_deleted_at ON assets(deleted_at);
-        CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag);
+        )
         "#,
-    )
-    .execute(pool)
-    .await?;
+        "CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category)",
+        "CREATE INDEX IF NOT EXISTS idx_assets_created_at ON assets(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_assets_deleted_at ON assets(deleted_at)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag)",
+    ];
+
+    for statement in STATEMENTS {
+        sqlx::query(statement).execute(pool).await?;
+    }
+
     Ok(())
 }
 
@@ -170,10 +180,16 @@ pub async fn insert_asset(pool: &SqlitePool, row: &AssetRow, tags: &[String]) ->
     get_asset(pool, &row.id, true).await
 }
 
-pub async fn update_asset(pool: &SqlitePool, id: &str, req: UpdateAssetRequest) -> AppResult<Asset> {
+pub async fn update_asset(
+    pool: &SqlitePool,
+    id: &str,
+    req: UpdateAssetRequest,
+) -> AppResult<Asset> {
     let current = get_asset(pool, id, true).await?;
     if current.row.deleted_at.is_some() {
-        return Err(AppError::Conflict("deleted assets cannot be edited until restored in a future version".to_string()));
+        return Err(AppError::Conflict(
+            "deleted assets cannot be edited until restored in a future version".to_string(),
+        ));
     }
 
     let name = req.name.unwrap_or(current.row.name);
@@ -186,7 +202,9 @@ pub async fn update_asset(pool: &SqlitePool, id: &str, req: UpdateAssetRequest) 
     let source_url = req.source_url.or(current.row.source_url);
     let creator = req.creator.or(current.row.creator);
     let license = req.license.or(current.row.license);
-    let attribution_required = req.attribution_required.unwrap_or(current.row.attribution_required);
+    let attribution_required = req
+        .attribution_required
+        .unwrap_or(current.row.attribution_required);
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut tx = pool.begin().await?;
@@ -220,12 +238,14 @@ pub async fn update_asset(pool: &SqlitePool, id: &str, req: UpdateAssetRequest) 
 
 pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    let result = sqlx::query("UPDATE assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL")
-        .bind(&now)
-        .bind(&now)
-        .bind(id)
-        .execute(pool)
-        .await?;
+    let result = sqlx::query(
+        "UPDATE assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(id)
+    .execute(pool)
+    .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
@@ -234,23 +254,38 @@ pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
 }
 
 pub async fn stats(pool: &SqlitePool) -> AppResult<StatsResponse> {
-    let active_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL")
-        .fetch_one(pool).await?;
-    let deleted_assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NOT NULL")
-        .fetch_one(pool).await?;
-    let total_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(byte_size), 0) FROM assets WHERE deleted_at IS NULL")
-        .fetch_one(pool).await?;
+    let active_assets: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL")
+            .fetch_one(pool)
+            .await?;
+    let deleted_assets: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    let total_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(byte_size), 0) FROM assets WHERE deleted_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
     let unique_tags: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT tag) FROM asset_tags")
-        .fetch_one(pool).await?;
+        .fetch_one(pool)
+        .await?;
 
-    Ok(StatsResponse { active_assets, deleted_assets, total_bytes, unique_tags })
+    Ok(StatsResponse {
+        active_assets,
+        deleted_assets,
+        total_bytes,
+        unique_tags,
+    })
 }
 
 async fn hydrate(pool: &SqlitePool, row: AssetRow) -> AppResult<Asset> {
-    let tags = sqlx::query_scalar::<_, String>("SELECT tag FROM asset_tags WHERE asset_id = ? ORDER BY tag COLLATE NOCASE")
-        .bind(&row.id)
-        .fetch_all(pool)
-        .await?;
+    let tags = sqlx::query_scalar::<_, String>(
+        "SELECT tag FROM asset_tags WHERE asset_id = ? ORDER BY tag COLLATE NOCASE",
+    )
+    .bind(&row.id)
+    .fetch_all(pool)
+    .await?;
     Ok(Asset { row, tags })
 }
 
@@ -264,7 +299,8 @@ async fn replace_tags_tx(
         .execute(&mut **tx)
         .await?;
 
-    let mut normalized = tags.iter()
+    let mut normalized = tags
+        .iter()
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>();
