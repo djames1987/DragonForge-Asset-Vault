@@ -1,9 +1,11 @@
 mod config;
 mod db;
 mod error;
+mod logging;
 mod models;
 mod routes;
 mod storage;
+mod thumbnail;
 
 use anyhow::Context;
 use config::AppConfig;
@@ -13,17 +15,27 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dragonforge_asset_vault=info,tower_http=info".into()),
-        )
-        .init();
+    let config = AppConfig::load()
+        .await
+        .context("failed to load DragonForge configuration")?;
 
-    let config = AppConfig::load().await.context("failed to load DragonForge configuration")?;
     tokio::fs::create_dir_all(&config.storage.data_dir)
         .await
         .context("failed to create vault data directory")?;
+
+    let log_dir = config.storage.data_dir.join("logs");
+    let _log_guard = logging::init_file_logging(
+        &log_dir,
+        "server.log",
+        "dragonforge_asset_vault=info,tower_http=info",
+    )?;
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        phase = 3,
+        log_dir = %log_dir.display(),
+        "DragonForge server starting"
+    );
 
     let pool = db::connect(&config.database_path())
         .await
@@ -32,7 +44,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to initialize asset storage")?;
 
-    info!(storage = %storage.root().display(), database = %config.database_path().display(), "vault storage initialized");
+    info!(
+        storage = %storage.root().display(),
+        database = %config.database_path().display(),
+        "vault storage initialized"
+    );
 
     let app = routes::router(
         AppState { db: pool, storage },
@@ -46,16 +62,19 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind DragonForge server to {address}"))?;
 
-    info!(%address, "DragonForge Asset Vault Phase 1 is online");
+    info!(%address, "DragonForge Asset Vault Phase 3 is online");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    info!("DragonForge server stopped cleanly");
     Ok(())
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
