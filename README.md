@@ -1,12 +1,12 @@
 # DragonForge Asset Vault
 
-DragonForge Asset Vault is a LAN-first asset management system for 3D game development. The vault keeps source assets, metadata, hashes, licensing information, and future preview/version data on hardware you control while developer workstations access the library through a dedicated desktop client.
+DragonForge Asset Vault is a LAN-first asset management system for 3D game development. The vault keeps source assets, metadata, hashes, licensing information, previews, and future version data on hardware you control while developer workstations access the library through a dedicated desktop client.
 
 ## Current milestone
 
-**Phase 2 — LAN Desktop Client**
+**Phase 3 — Visual Previews + Client/Server Logging**
 
-### Phase 1 server
+### Asset server
 
 - LAN HTTP API
 - SQLite metadata database
@@ -18,8 +18,11 @@ DragonForge Asset Vault is a LAN-first asset management system for 3D game devel
 - Metadata updates and soft deletion
 - Health and statistics endpoints
 - Configurable storage/database/listen paths
+- Server-side cached image thumbnails
+- On-demand preview generation for existing images
+- Persistent daily action logs
 
-### Phase 2 client
+### Desktop client
 
 - Native Windows-first desktop UI
 - Configurable LAN server address and connection status
@@ -27,11 +30,14 @@ DragonForge Asset Vault is a LAN-first asset management system for 3D game devel
 - Drag-and-drop and file-picker uploads
 - Asset metadata/license entry
 - Background network transfers
+- Image thumbnails in the asset grid
+- Larger image preview in asset details
 - Asset detail view
 - Safe local downloads
 - Persistent workstation settings
+- Persistent daily action logs
 
-See `docs/PHASE_1.md` for the server and `docs/PHASE_2.md` for client build, setup, and the first asset test.
+See `docs/PHASE_1.md`, `docs/PHASE_2.md`, and `docs/PHASE_3.md` for setup and validation steps.
 
 ## Quick start
 
@@ -45,4 +51,20 @@ In another terminal:
 cargo run --release --bin dragonforge-client
 ```
 
-The actual asset binaries are stored on the configured LAN vault disk, not in GitHub.
+The actual asset binaries and generated previews are stored on the configured LAN vault disk, not in GitHub.
+
+## Logs
+
+Server:
+
+```text
+<storage.data_dir>/logs/
+```
+
+Windows client:
+
+```text
+%APPDATA%\DragonForge\AssetVault\logs\
+```
+
+These logs are intended to make testing and troubleshooting easy to verify.
