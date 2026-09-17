@@ -1,15 +1,19 @@
 use crate::{
     db,
     error::{AppError, AppResult},
-    models::{AssetQuery, AssetRow, DeleteResponse, HealthResponse, UpdateAssetRequest, UploadMetadata, UploadResponse},
+    models::{
+        AssetQuery, AssetRow, DeleteResponse, HealthResponse, UpdateAssetRequest, UploadMetadata,
+        UploadResponse,
+    },
     storage::{self, IncomingFile, Storage},
+    thumbnail,
 };
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::get,
     Json, Router,
 };
 use sqlx::SqlitePool;
@@ -17,6 +21,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -30,8 +35,12 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/health", get(health))
         .route("/api/stats", get(stats))
         .route("/api/assets", get(list_assets).post(upload_asset))
-        .route("/api/assets/:id", get(get_asset).patch(update_asset).delete(delete_asset))
+        .route(
+            "/api/assets/:id",
+            get(get_asset).patch(update_asset).delete(delete_asset),
+        )
         .route("/api/assets/:id/download", get(download_asset))
+        .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -39,15 +48,17 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
 }
 
 async fn health() -> Json<HealthResponse> {
+    info!("health check");
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 1,
+        phase: 3,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
 async fn stats(State(state): State<Arc<AppState>>) -> AppResult<impl IntoResponse> {
+    info!("vault stats requested");
     Ok(Json(db::stats(&state.db).await?))
 }
 
@@ -55,13 +66,25 @@ async fn list_assets(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AssetQuery>,
 ) -> AppResult<impl IntoResponse> {
-    Ok(Json(db::list_assets(&state.db, &query).await?))
+    info!(
+        search = ?query.q,
+        category = ?query.category,
+        tag = ?query.tag,
+        include_deleted = query.include_deleted,
+        limit = ?query.limit,
+        offset = ?query.offset,
+        "asset list requested"
+    );
+    let assets = db::list_assets(&state.db, &query).await?;
+    info!(count = assets.len(), "asset list returned");
+    Ok(Json(assets))
 }
 
 async fn get_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
+    info!(asset_id = %id, "asset metadata requested");
     Ok(Json(db::get_asset(&state.db, &id, false).await?))
 }
 
@@ -69,6 +92,7 @@ async fn upload_asset(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> AppResult<Response> {
+    info!("asset upload request received");
     let mut metadata = UploadMetadata::default();
     let mut incoming: Option<IncomingFile> = None;
 
@@ -77,7 +101,10 @@ async fn upload_asset(
         match field_name.as_str() {
             "file" => {
                 if incoming.is_some() {
-                    return Err(AppError::BadRequest("only one file may be uploaded per request".to_string()));
+                    warn!("upload rejected because more than one file was supplied");
+                    return Err(AppError::BadRequest(
+                        "only one file may be uploaded per request".to_string(),
+                    ));
                 }
                 incoming = Some(storage::stream_field_to_temp(&state.storage, field).await?);
             }
@@ -100,16 +127,35 @@ async fn upload_asset(
                     .collect();
             }
             _ => {
-                // Unknown fields are intentionally ignored for forward compatibility.
+                info!(field = %field_name, "unknown upload metadata field ignored");
             }
         }
     }
 
-    let incoming = incoming.ok_or_else(|| AppError::BadRequest("multipart field 'file' is required".to_string()))?;
+    let incoming = incoming.ok_or_else(|| {
+        AppError::BadRequest("multipart field 'file' is required".to_string())
+    })?;
+
+    info!(
+        filename = %incoming.original_filename,
+        byte_size = incoming.byte_size,
+        sha256 = %incoming.sha256,
+        category = ?metadata.category,
+        "asset upload parsed"
+    );
 
     if let Some(existing) = db::get_asset_by_hash(&state.db, &incoming.sha256).await? {
         state.storage.remove_temp(&incoming.temp_path).await;
-        let body = UploadResponse { duplicate: true, asset: existing };
+        info!(
+            asset_id = %existing.row.id,
+            name = %existing.row.name,
+            sha256 = %incoming.sha256,
+            "duplicate upload blocked"
+        );
+        let body = UploadResponse {
+            duplicate: true,
+            asset: existing,
+        };
         return Ok((StatusCode::OK, Json(body)).into_response());
     }
 
@@ -122,12 +168,19 @@ async fn upload_asset(
     let name = metadata.name.unwrap_or(fallback_name);
     if name.trim().is_empty() {
         state.storage.remove_temp(&incoming.temp_path).await;
-        return Err(AppError::BadRequest("asset name cannot be empty".to_string()));
+        warn!("upload rejected because asset name was empty");
+        return Err(AppError::BadRequest(
+            "asset name cannot be empty".to_string(),
+        ));
     }
 
     let final_path = match state
         .storage
-        .commit_temp(&incoming.temp_path, &incoming.sha256, incoming.extension.as_deref())
+        .commit_temp(
+            &incoming.temp_path,
+            &incoming.sha256,
+            incoming.extension.as_deref(),
+        )
         .await
     {
         Ok(path) => path,
@@ -136,6 +189,7 @@ async fn upload_asset(
             return Err(err);
         }
     };
+
     let relative_path = state.storage.relative_path(&final_path)?;
     let now = chrono::Utc::now().to_rfc3339();
     let row = AssetRow {
@@ -159,7 +213,32 @@ async fn upload_asset(
     };
 
     let asset = db::insert_asset(&state.db, &row, &metadata.tags).await?;
-    Ok((StatusCode::CREATED, Json(UploadResponse { duplicate: false, asset })).into_response())
+    info!(
+        asset_id = %asset.row.id,
+        name = %asset.row.name,
+        filename = %asset.row.original_filename,
+        byte_size = asset.row.byte_size,
+        "asset stored and cataloged"
+    );
+
+    if thumbnail::is_previewable_image(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_thumbnail(&state.storage, &asset.row).await {
+            warn!(
+                asset_id = %asset.row.id,
+                error = %err,
+                "asset stored but thumbnail generation failed"
+            );
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse {
+            duplicate: false,
+            asset,
+        }),
+    )
+        .into_response())
 }
 
 async fn update_asset(
@@ -167,14 +246,19 @@ async fn update_asset(
     Path(id): Path<String>,
     Json(request): Json<UpdateAssetRequest>,
 ) -> AppResult<impl IntoResponse> {
-    Ok(Json(db::update_asset(&state.db, &id, request).await?))
+    info!(asset_id = %id, "asset metadata update requested");
+    let asset = db::update_asset(&state.db, &id, request).await?;
+    info!(asset_id = %id, "asset metadata updated");
+    Ok(Json(asset))
 }
 
 async fn delete_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
+    info!(asset_id = %id, "asset soft delete requested");
     db::soft_delete(&state.db, &id).await?;
+    info!(asset_id = %id, "asset soft deleted");
     Ok(Json(DeleteResponse { id, deleted: true }))
 }
 
@@ -182,22 +266,33 @@ async fn download_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
+    info!(asset_id = %id, "asset download requested");
     let asset = db::get_asset(&state.db, &id, false).await?;
     let path = state.storage.resolve_relative(&asset.row.storage_path)?;
-    let file = File::open(path).await.map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound { AppError::NotFound } else { AppError::Io(err) }
+    let file = File::open(&path).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Io(err)
+        }
     })?;
 
     let mut headers = HeaderMap::new();
-    let safe_filename = asset.row.original_filename.replace(['\r', '\n', '"'], "_");
-    let disposition = format!("attachment; filename=\"{}\"", safe_filename);
+    let safe_filename = asset
+        .row
+        .original_filename
+        .replace(['', '
+', '"'], "_");
+    let disposition = format!("attachment; filename="{}"", safe_filename);
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&disposition).map_err(|_| AppError::BadRequest("invalid filename metadata".to_string()))?,
+        HeaderValue::from_str(&disposition)
+            .map_err(|_| AppError::BadRequest("invalid filename metadata".to_string()))?,
     );
     headers.insert(
         header::CONTENT_LENGTH,
-        HeaderValue::from_str(&asset.row.byte_size.to_string()).unwrap(),
+        HeaderValue::from_str(&asset.row.byte_size.to_string())
+            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid content length")))?,
     );
     if let Some(mime) = asset.row.mime_type.as_deref() {
         if let Ok(value) = HeaderValue::from_str(mime) {
@@ -205,19 +300,70 @@ async fn download_asset(
         }
     }
 
+    info!(
+        asset_id = %id,
+        filename = %asset.row.original_filename,
+        byte_size = asset.row.byte_size,
+        path = %path.display(),
+        "asset download started"
+    );
+
+    let stream = ReaderStream::new(file);
+    Ok((headers, Body::from_stream(stream)).into_response())
+}
+
+async fn asset_thumbnail(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    info!(asset_id = %id, "thumbnail requested");
+    let asset = db::get_asset(&state.db, &id, false).await?;
+    let Some(path) = thumbnail::get_or_create_thumbnail(&state.storage, &asset.row).await? else {
+        info!(asset_id = %id, "thumbnail unavailable for non-image asset");
+        return Err(AppError::NotFound);
+    };
+
+    let metadata = tokio::fs::metadata(&path).await?;
+    let file = File::open(&path).await?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&metadata.len().to_string())
+            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid thumbnail content length")))?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+
+    info!(
+        asset_id = %id,
+        path = %path.display(),
+        byte_size = metadata.len(),
+        "thumbnail served"
+    );
+
     let stream = ReaderStream::new(file);
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
 fn clean_optional(value: String) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_bool(value: &str) -> AppResult<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" | "" => Ok(false),
-        other => Err(AppError::BadRequest(format!("invalid boolean value: {other}"))),
+        other => Err(AppError::BadRequest(format!(
+            "invalid boolean value: {other}"
+        ))),
     }
 }
