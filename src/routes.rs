@@ -278,12 +278,19 @@ async fn download_asset(
     })?;
 
     let mut headers = HeaderMap::new();
-    let safe_filename = asset
+    let safe_filename: String = asset
         .row
         .original_filename
-        .replace(['', '
-', '"'], "_");
-    let disposition = format!("attachment; filename=\\\"{}\\\"", safe_filename);
+        .chars()
+        .map(|c| {
+            if c == char::from(13) || c == char::from(10) || c == '"' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let disposition = format!(r#"attachment; filename="{}""#, safe_filename);
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&disposition)
