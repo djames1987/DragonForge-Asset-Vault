@@ -271,3 +271,21 @@ Raw API tokens are not stored in the database backup.
 15. Check an asset out as the Developer and confirm the server records the authenticated username rather than a client-supplied username.
 16. Attempt to disable or delete the only enabled Administrator; confirm DragonForge refuses.
 17. Send client/server logs for Phase 13 validation.
+
+
+## Phase 13.1 checkout identity maintenance
+
+Runtime testing found an authenticated identity/UI mismatch:
+
+- server checkout holder: authenticated DragonForge username
+- client ownership comparison: local Windows username
+
+For example, `Djames@LAPTOP-JAMES` could be a valid server checkout while the local Windows identity remained `DJame@LAPTOP-JAMES`. The client therefore displayed the user's own checkout as locked by somebody else and hid **Check In**.
+
+The client now resolves checkout ownership as:
+
+1. authenticated DragonForge username when Phase 13 auth is enabled and authenticated
+2. legacy local user identity when authentication is disabled
+3. the normal workstation identity in both modes
+
+This also makes the checkout request UI use the same resolved identity for consistency, while the server remains authoritative and continues overwriting the username from authentication middleware.
