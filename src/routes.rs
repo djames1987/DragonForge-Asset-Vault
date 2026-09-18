@@ -106,6 +106,55 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+async fn refresh_semantic_index_nonfatal(state: &AppState, asset: &crate::models::Asset) {
+    if !state.semantic.enabled {
+        return;
+    }
+
+    let document = semantic::asset_document(asset);
+    let hash = semantic::document_hash(&document);
+    match semantic::embed_text(&state.semantic, &document).await {
+        Ok(embedding) => {
+            if let Err(err) = db::upsert_semantic_embedding(
+                &state.db,
+                &asset.row.id,
+                &state.semantic.model,
+                &hash,
+                &embedding,
+            )
+            .await
+            {
+                warn!(
+                    asset_id = %asset.row.id,
+                    error = %err,
+                    "asset saved but semantic index update failed"
+                );
+            } else {
+                info!(
+                    asset_id = %asset.row.id,
+                    model = %state.semantic.model,
+                    dimensions = embedding.len(),
+                    "asset semantic index refreshed"
+                );
+            }
+        }
+        Err(err) => {
+            if let Err(delete_err) = db::delete_semantic_embedding(&state.db, &asset.row.id).await {
+                warn!(
+                    asset_id = %asset.row.id,
+                    error = %delete_err,
+                    "failed to clear stale semantic index"
+                );
+            }
+            warn!(
+                asset_id = %asset.row.id,
+                error = %err,
+                "asset saved without semantic index; keyword search remains available"
+            );
+        }
+    }
+}
+
 async fn semantic_status(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<impl IntoResponse> {
@@ -549,6 +598,8 @@ async fn upload_asset(
         "asset stored and cataloged"
     );
 
+    refresh_semantic_index_nonfatal(&state, &asset).await;
+
     if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
         if let Err(err) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await {
             warn!(
@@ -577,8 +628,8 @@ async fn update_asset(
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset metadata update requested");
     let asset = db::update_asset(&state.db, &id, request).await?;
-    db::delete_semantic_embedding(&state.db, &id).await?;
-    info!(asset_id = %id, "asset metadata updated; semantic index invalidated");
+    refresh_semantic_index_nonfatal(&state, &asset).await;
+    info!(asset_id = %id, "asset metadata updated");
     Ok(Json(asset))
 }
 
@@ -797,6 +848,7 @@ async fn upload_asset_version(
         }
     }
 
+    refresh_semantic_index_nonfatal(&state, &asset).await;
     info!(
         asset_id = %id,
         version = asset.current_version,
@@ -985,6 +1037,7 @@ async fn import_package(
         }
     }
 
+    refresh_semantic_index_nonfatal(&state, &asset).await;
     info!(
         asset_id = %asset_id,
         file_count = manifest.files.len(),
@@ -1071,6 +1124,7 @@ async fn upload_package_version(
         }
     }
 
+    refresh_semantic_index_nonfatal(&state, &asset).await;
     info!(
         asset_id = %id,
         version = asset.current_version,
@@ -1150,8 +1204,9 @@ async fn restore_asset(
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset restore requested");
     db::restore_asset(&state.db, &id).await?;
-    db::delete_semantic_embedding(&state.db, &id).await?;
-    info!(asset_id = %id, "asset restored; semantic reindex required");
+    let restored_asset = db::get_asset(&state.db, &id, false).await?;
+    refresh_semantic_index_nonfatal(&state, &restored_asset).await;
+    info!(asset_id = %id, "asset restored");
     Ok(Json(RestoreResponse { id, restored: true }))
 }
 
