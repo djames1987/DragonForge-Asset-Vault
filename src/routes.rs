@@ -566,8 +566,28 @@ async fn restore_asset_version(
     let asset = db::restore_asset_version(&state.db, &id, version, request.note).await?;
 
     if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
-        if let Err(err) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await {
-            warn!(asset_id = %id, error = %err, "restored version preview generation failed");
+        let package_files =
+            db::list_package_files(&state.db, &id, asset.current_version).await?;
+        let preview_result = if package_files.is_empty() {
+            thumbnail::get_or_create_preview(&state.storage, &asset.row).await
+        } else {
+            thumbnail::get_or_create_package_preview(
+                &state.storage,
+                &asset.row,
+                asset.current_version,
+                &package_files,
+            )
+            .await
+        };
+
+        if let Err(err) = preview_result {
+            warn!(
+                asset_id = %id,
+                current_version = asset.current_version,
+                package_files = package_files.len(),
+                error = %err,
+                "restored version preview generation failed"
+            );
         }
     }
 
