@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 12 — Asset Checkout & Collaboration Locks**
+**Phase 12.1 — Scrollable Asset Details Maintenance**
 
 ### Server
 
@@ -190,3 +190,8 @@ with `DRAGONFORGE_USER` and `DRAGONFORGE_WORKSTATION` environment-variable overr
 A checked-out asset is protected from mutating requests originating from another client identity. Protected operations include metadata edits, new single-file/package revisions, version restores, soft delete, and restore.
 
 Unlocked assets remain editable for backward compatibility. Phase 12 is still a trusted-LAN collaboration system, not an authentication boundary.
+
+
+## Phase 12.1 UI maintenance
+
+The Asset Details side panel is now vertically scrollable. This keeps checkout/check-in controls, metadata actions, version controls, project actions, and removal controls accessible on smaller windows and lower-resolution displays.
