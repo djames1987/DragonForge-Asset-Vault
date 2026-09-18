@@ -66,6 +66,44 @@ struct UploadResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PackageFile {
+    id: String,
+    asset_id: String,
+    version_number: i64,
+    relative_path: String,
+    original_filename: String,
+    extension: Option<String>,
+    mime_type: Option<String>,
+    byte_size: i64,
+    sha256: String,
+    storage_path: String,
+    is_primary: bool,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PackageManifest {
+    asset_id: String,
+    version_number: i64,
+    primary_path: String,
+    files: Vec<PackageFile>,
+    referenced_dependencies: Vec<String>,
+    missing_dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PackageImportResponse {
+    asset: Asset,
+    manifest: PackageManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PackageVersionResponse {
+    asset: Asset,
+    manifest: PackageManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Project {
     id: String,
     name: String,
@@ -92,6 +130,20 @@ impl Default for ClientSettings {
 #[derive(Debug, Clone, Default)]
 struct UploadForm {
     file_path: Option<PathBuf>,
+    name: String,
+    category: String,
+    tags: String,
+    description: String,
+    creator: String,
+    source_url: String,
+    license: String,
+    attribution_required: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PackageForm {
+    file_path: Option<PathBuf>,
+    primary_path: String,
     name: String,
     category: String,
     tags: String,
@@ -170,6 +222,15 @@ enum ClientEvent {
         asset_id: String,
         result: Result<Asset, String>,
     },
+    PackageImported(Result<PackageImportResponse, String>),
+    PackageManifestLoaded {
+        asset_id: String,
+        result: Result<PackageManifest, String>,
+    },
+    PackageVersionChanged {
+        asset_id: String,
+        result: Result<PackageVersionResponse, String>,
+    },
 }
 
 struct DragonForgeClient {
@@ -188,13 +249,17 @@ struct DragonForgeClient {
     upload: UploadForm,
     edit: EditForm,
     project_form: ProjectForm,
+    package_form: PackageForm,
     show_upload: bool,
     show_edit: bool,
     show_project_create: bool,
+    show_package_import: bool,
+    show_package_contents: bool,
     show_versions: bool,
     version_asset_id: Option<String>,
     versions: Vec<AssetVersion>,
     version_note: String,
+    package_manifest: Option<PackageManifest>,
     busy_count: usize,
     thumbnails: HashMap<String, egui::TextureHandle>,
     thumbnail_pending: HashSet<String>,
@@ -232,13 +297,17 @@ impl DragonForgeClient {
             upload: UploadForm::default(),
             edit: EditForm::default(),
             project_form: ProjectForm::default(),
+            package_form: PackageForm::default(),
             show_upload: false,
             show_edit: false,
             show_project_create: false,
+            show_package_import: false,
+            show_package_contents: false,
             show_versions: false,
             version_asset_id: None,
             versions: Vec::new(),
             version_note: String::new(),
+            package_manifest: None,
             busy_count: 0,
             thumbnails: HashMap::new(),
             thumbnail_pending: HashSet::new(),
@@ -466,6 +535,74 @@ impl DragonForgeClient {
         thread::spawn(move || {
             let result = restore_asset_version(&base, &asset_id, version_number);
             let _ = tx.send(ClientEvent::VersionChanged { asset_id, result });
+        });
+    }
+
+    fn begin_package_import(&mut self, path: PathBuf) {
+        if !path.is_file() {
+            self.status = "Select a ZIP package.".to_string();
+            return;
+        }
+        self.package_form = PackageForm {
+            file_path: Some(path.clone()),
+            name: path.file_stem().and_then(|v| v.to_str()).unwrap_or("Package").to_string(),
+            ..PackageForm::default()
+        };
+        self.show_package_import = true;
+        info!(path = %path.display(), "package selected for import");
+    }
+
+    fn submit_package_import(&mut self) {
+        let Some(path) = self.package_form.file_path.clone() else {
+            self.status = "No package ZIP selected.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let form = self.package_form.clone();
+        self.busy_count += 1;
+        self.status = format!("Importing package {}...", path.display());
+        thread::spawn(move || {
+            let result = import_package(&base, &form);
+            let _ = tx.send(ClientEvent::PackageImported(result));
+        });
+    }
+
+    fn open_package_contents(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.show_package_contents = true;
+        thread::spawn(move || {
+            let result = fetch_package_manifest(&base, &asset_id);
+            let _ = tx.send(ClientEvent::PackageManifestLoaded { asset_id, result });
+        });
+    }
+
+    fn upload_package_version(&mut self) {
+        let Some(asset_id) = self.version_asset_id.clone() else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Select package ZIP for new revision")
+            .add_filter("ZIP package", &["zip"])
+            .pick_file()
+        else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let note = self.version_note.trim().to_string();
+        self.busy_count += 1;
+        self.status = format!("Uploading package revision {}...", path.display());
+        thread::spawn(move || {
+            let result = upload_package_version(&base, &asset_id, &path, &note);
+            let _ = tx.send(ClientEvent::PackageVersionChanged { asset_id, result });
         });
     }
 
@@ -892,6 +1029,55 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::PackageImported(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(
+                                asset_id = %response.asset.id,
+                                files = response.manifest.files.len(),
+                                missing = response.manifest.missing_dependencies.len(),
+                                "package import completed"
+                            );
+                            self.selected_id = Some(response.asset.id.clone());
+                            self.package_manifest = Some(response.manifest);
+                            self.show_package_import = false;
+                            self.package_form = PackageForm::default();
+                            self.status = format!("Imported package {}", response.asset.name);
+                            self.refresh_assets();
+                        }
+                        Err(err) => self.status = format!("Package import failed: {err}"),
+                    }
+                }
+                ClientEvent::PackageManifestLoaded { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(manifest) => {
+                            info!(asset_id = %asset_id, files = manifest.files.len(), missing = manifest.missing_dependencies.len(), "package manifest loaded");
+                            self.package_manifest = Some(manifest);
+                        }
+                        Err(err) => {
+                            self.status = format!("Package manifest failed: {err}");
+                            self.package_manifest = None;
+                        }
+                    }
+                }
+                ClientEvent::PackageVersionChanged { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(asset_id = %asset_id, version = response.asset.current_version, files = response.manifest.files.len(), "package version uploaded");
+                            self.package_manifest = Some(response.manifest);
+                            self.thumbnails.remove(&asset_id);
+                            self.thumbnail_pending.remove(&asset_id);
+                            self.version_note.clear();
+                            self.status = format!("{} is now package version {}", response.asset.name, response.asset.current_version);
+                            self.refresh_versions(asset_id.clone());
+                            self.refresh_assets();
+                        }
+                        Err(err) => self.status = format!("Package version failed: {err}"),
+                    }
+                }
             }
             ctx.request_repaint();
         }
@@ -1006,6 +1192,15 @@ impl DragonForgeClient {
                     .pick_file()
                 {
                     self.begin_upload(path);
+                }
+            }
+            if ui.button("Add Package ZIP").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Select a multi-file asset ZIP")
+                    .add_filter("ZIP package", &["zip"])
+                    .pick_file()
+                {
+                    self.begin_package_import(path);
                 }
             }
         });
@@ -1207,6 +1402,9 @@ impl DragonForgeClient {
             if ui.button("Version History").clicked() {
                 self.open_versions_selected();
             }
+            if ui.button("Package / Dependencies").clicked() {
+                self.open_package_contents();
+            }
             if ui.button("Move to Recycle Bin").clicked() {
                 self.delete_selected();
             }
@@ -1332,6 +1530,9 @@ impl DragonForgeClient {
                     if ui.button("Upload New Version").clicked() {
                         self.upload_new_version();
                     }
+                    if ui.button("Upload Package Version ZIP").clicked() {
+                        self.upload_package_version();
+                    }
                 });
 
                 ui.separator();
@@ -1366,6 +1567,79 @@ impl DragonForgeClient {
             });
 
         self.show_versions = open;
+    }
+
+    fn package_import_window(&mut self, ctx: &egui::Context) {
+        if !self.show_package_import {
+            return;
+        }
+        let mut open = self.show_package_import;
+        egui::Window::new("Import Multi-File Asset Package")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(600.0)
+            .show(ctx, |ui| {
+                if let Some(path) = &self.package_form.file_path {
+                    ui.label(format!("ZIP: {}", path.display()));
+                }
+                ui.label("Leave Primary Path blank to auto-detect GLB/GLTF/OBJ.");
+                form_row(ui, "Primary Path", &mut self.package_form.primary_path);
+                form_row(ui, "Name", &mut self.package_form.name);
+                form_row(ui, "Category", &mut self.package_form.category);
+                form_row(ui, "Tags", &mut self.package_form.tags);
+                form_row(ui, "Creator", &mut self.package_form.creator);
+                form_row(ui, "Source URL", &mut self.package_form.source_url);
+                form_row(ui, "License", &mut self.package_form.license);
+                ui.checkbox(&mut self.package_form.attribution_required, "Attribution required");
+                ui.label("Description");
+                ui.add(egui::TextEdit::multiline(&mut self.package_form.description)
+                    .desired_rows(3).desired_width(f32::INFINITY));
+                ui.separator();
+                if ui.add_enabled(self.busy_count == 0, egui::Button::new("Import Package")).clicked() {
+                    self.submit_package_import();
+                }
+            });
+        self.show_package_import = open && self.show_package_import;
+    }
+
+    fn package_contents_window(&mut self, ctx: &egui::Context) {
+        if !self.show_package_contents {
+            return;
+        }
+        let mut open = self.show_package_contents;
+        let manifest = self.package_manifest.clone();
+        egui::Window::new("Package Contents & Dependencies")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(680.0)
+            .show(ctx, |ui| {
+                let Some(manifest) = manifest else {
+                    ui.label("Loading package manifest...");
+                    return;
+                };
+                ui.heading(format!("Version v{}", manifest.version_number));
+                ui.label(format!("Primary: {}", manifest.primary_path));
+                ui.label(format!("Files: {}", manifest.files.len()));
+                if manifest.missing_dependencies.is_empty() {
+                    ui.label("Dependency status: complete");
+                } else {
+                    ui.label(format!("Missing dependencies: {}", manifest.missing_dependencies.len()));
+                    for missing in &manifest.missing_dependencies {
+                        ui.label(format!("⚠ {missing}"));
+                    }
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for file in &manifest.files {
+                        ui.horizontal_wrapped(|ui| {
+                            if file.is_primary { ui.label("PRIMARY"); }
+                            ui.label(&file.relative_path);
+                            ui.small(human_size(file.byte_size));
+                        });
+                    }
+                });
+            });
+        self.show_package_contents = open;
     }
 
     fn project_window(&mut self, ctx: &egui::Context) {
@@ -1460,7 +1734,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 6");
+                ui.label("DragonForge Client Phase 7");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -1470,6 +1744,8 @@ impl eframe::App for DragonForgeClient {
         self.edit_window(ctx);
         self.project_window(ctx);
         self.versions_window(ctx);
+        self.package_import_window(ctx);
+        self.package_contents_window(ctx);
     }
 }
 
@@ -1598,44 +1874,77 @@ fn create_project(base: &str, data: &ProjectForm) -> Result<Project, String> {
 }
 
 fn add_asset_to_project(base: &str, project: &Project, asset: &Asset) -> Result<PathBuf, String> {
+    let client = DragonForgeClient::api_client()?;
+    let manifest: PackageManifest = client
+        .get(format!("{base}/api/assets/{}/package", asset.id))
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())?;
+
     let root = PathBuf::from(&project.local_path).join("DragonForgeAssets");
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
-    let target = root.join(asset.original_filename.replace(['/', '\\'], "_"));
-    let client = DragonForgeClient::api_client()?;
-    let mut response = client
-        .get(format!("{base}/api/assets/{}/download", asset.id))
-        .send()
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    let package_mode = manifest.files.len() > 1 || !manifest.referenced_dependencies.is_empty();
+    let export_root = if package_mode {
+        root.join(sanitize_component(&asset.name))
+    } else {
+        root.clone()
+    };
+    fs::create_dir_all(&export_root).map_err(|e| e.to_string())?;
 
-    let mut file = fs::File::create(&target).map_err(|e| e.to_string())?;
-    io::copy(&mut response, &mut file).map_err(|e| e.to_string())?;
+    let mut primary_target = None;
+    for file in &manifest.files {
+        let target = if package_mode {
+            export_root.join(Path::new(&file.relative_path))
+        } else {
+            export_root.join(&file.original_filename)
+        };
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
 
-    let relative_path = format!(
-        "DragonForgeAssets/{}",
-        target
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or(&asset.original_filename)
-    );
+        let mut response = if file.id.starts_with("single-") {
+            client.get(format!("{base}/api/assets/{}/download", asset.id))
+        } else {
+            client.get(format!(
+                "{base}/api/assets/{}/versions/{}/package/files/{}/download",
+                asset.id, manifest.version_number, file.id
+            ))
+        }
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?;
+
+        let mut output = fs::File::create(&target).map_err(|e| e.to_string())?;
+        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        if file.is_primary {
+            primary_target = Some(target);
+        }
+    }
+
+    let relative_path = primary_target
+        .as_ref()
+        .and_then(|path| path.strip_prefix(&project.local_path).ok())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| format!("DragonForgeAssets/{}", asset.original_filename));
 
     let body = serde_json::json!({
         "asset_id": asset.id,
         "relative_path": relative_path,
-        "version_number": asset.current_version
+        "version_number": manifest.version_number
     });
-
     client
         .post(format!("{base}/api/projects/{}/assets", project.id))
         .json(&body)
-        .send()
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?;
 
-    Ok(target)
+    Ok(primary_target.unwrap_or(export_root))
+}
+
+fn sanitize_component(value: &str) -> String {
+    value.chars()
+        .map(|ch| if ['<','>',':','"','/','\\','|','?','*'].contains(&ch) { '_' } else { ch })
+        .collect()
 }
 
 fn fetch_versions(base: &str, asset_id: &str) -> Result<Vec<AssetVersion>, String> {
@@ -1691,6 +2000,59 @@ fn restore_asset_version(
         .map_err(|e| e.to_string())?
         .json()
         .map_err(|e| e.to_string())
+}
+
+fn import_package(base: &str, data: &PackageForm) -> Result<PackageImportResponse, String> {
+    let path = data.file_path.as_ref().ok_or_else(|| "missing ZIP path".to_string())?;
+    let client = DragonForgeClient::api_client()?;
+    let file_part = multipart::Part::file(path).map_err(|e| e.to_string())?;
+    let mut form = multipart::Form::new().part("file", file_part);
+    for (name, value) in [
+        ("primary_path", data.primary_path.trim()),
+        ("name", data.name.trim()),
+        ("category", data.category.trim()),
+        ("tags", data.tags.trim()),
+        ("description", data.description.trim()),
+        ("creator", data.creator.trim()),
+        ("source_url", data.source_url.trim()),
+        ("license", data.license.trim()),
+    ] {
+        if !value.is_empty() {
+            form = form.text(name.to_string(), value.to_string());
+        }
+    }
+    form = form.text("attribution_required", data.attribution_required.to_string());
+
+    client.post(format!("{base}/api/packages"))
+        .multipart(form).send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())
+}
+
+fn fetch_package_manifest(base: &str, asset_id: &str) -> Result<PackageManifest, String> {
+    DragonForgeClient::api_client()?
+        .get(format!("{base}/api/assets/{asset_id}/package"))
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())
+}
+
+fn upload_package_version(
+    base: &str,
+    asset_id: &str,
+    path: &Path,
+    note: &str,
+) -> Result<PackageVersionResponse, String> {
+    let client = DragonForgeClient::api_client()?;
+    let file_part = multipart::Part::file(path).map_err(|e| e.to_string())?;
+    let mut form = multipart::Form::new().part("file", file_part);
+    if !note.is_empty() {
+        form = form.text("note", note.to_string());
+    }
+    client.post(format!("{base}/api/assets/{asset_id}/package-versions"))
+        .multipart(form).send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())
 }
 
 fn unique_download_path(folder: &Path, filename: &str) -> PathBuf {
@@ -1807,7 +2169,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 6,
+        phase = 7,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
