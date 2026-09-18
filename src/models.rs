@@ -165,3 +165,42 @@ pub struct AssetVersion {
 pub struct RestoreVersionRequest {
     pub note: Option<String>,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PackageFile {
+    pub id: String,
+    pub asset_id: String,
+    pub version_number: i64,
+    pub relative_path: String,
+    pub original_filename: String,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub storage_path: String,
+    pub is_primary: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageManifest {
+    pub asset_id: String,
+    pub version_number: i64,
+    pub primary_path: String,
+    pub files: Vec<PackageFile>,
+    pub referenced_dependencies: Vec<String>,
+    pub missing_dependencies: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackageImportResponse {
+    pub asset: Asset,
+    pub manifest: PackageManifest,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackageVersionResponse {
+    pub asset: Asset,
+    pub manifest: PackageManifest,
+}
