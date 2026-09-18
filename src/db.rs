@@ -941,6 +941,19 @@ pub async fn add_project_asset(
     })
 }
 
+pub async fn list_project_links(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> AppResult<Vec<ProjectAsset>> {
+    get_project(pool, project_id).await?;
+    Ok(sqlx::query_as::<_, ProjectAsset>(
+        "SELECT project_id, asset_id, relative_path, version_number, added_at FROM project_assets WHERE project_id = ? ORDER BY added_at DESC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn list_project_assets(
     pool: &SqlitePool,
     project_id: &str,
