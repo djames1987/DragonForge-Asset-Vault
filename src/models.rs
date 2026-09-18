@@ -365,7 +365,7 @@ pub struct BackupStatusResponse {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EnginePreset {
     pub id: &'static str,
     pub display_name: &'static str,
