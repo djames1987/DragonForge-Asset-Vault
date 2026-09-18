@@ -1,6 +1,6 @@
 [package]
 name = "dragonforge-asset-vault"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "LAN-first game asset storage vault"
 license = "MIT"
