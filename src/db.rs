@@ -4,7 +4,7 @@ use crate::{
     models::{
         Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetBrowserEntry,
-        ProjectAssetRequest,
+        ProjectAssetCount, ProjectAssetRequest,
         AuditEvent, AuditQuery, CreateUserRequest, SemanticEmbeddingRow, StatsResponse,
         StorageObjectRef, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole,
         VaultUser,
@@ -1587,6 +1587,23 @@ pub async fn list_project_assets(
         assets.push(hydrate(pool, row).await?);
     }
     Ok(assets)
+}
+
+pub async fn list_project_asset_counts(
+    pool: &SqlitePool,
+) -> AppResult<Vec<ProjectAssetCount>> {
+    Ok(sqlx::query_as::<_, ProjectAssetCount>(
+        r#"
+        SELECT p.id AS project_id, COUNT(pa.asset_id) AS asset_count
+        FROM projects p
+        LEFT JOIN project_assets pa ON pa.project_id = p.id
+        LEFT JOIN assets a ON a.id = pa.asset_id AND a.deleted_at IS NULL
+        GROUP BY p.id
+        ORDER BY p.name COLLATE NOCASE
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn list_project_asset_browser(
