@@ -476,6 +476,72 @@ pub async fn add_asset_version(
     get_asset(pool, asset_id, false).await
 }
 
+pub async fn add_package_version(
+    pool: &SqlitePool,
+    asset_id: &str,
+    original_filename: String,
+    extension: Option<String>,
+    mime_type: Option<String>,
+    byte_size: i64,
+    sha256: String,
+    storage_path: String,
+    note: Option<String>,
+) -> AppResult<Asset> {
+    get_asset(pool, asset_id, false).await?;
+    let next_version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM asset_versions WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_one(pool)
+    .await?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO asset_versions(
+            id, asset_id, version_number, original_filename, extension, mime_type,
+            byte_size, sha256, storage_path, note, created_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(asset_id)
+    .bind(next_version)
+    .bind(&original_filename)
+    .bind(&extension)
+    .bind(&mime_type)
+    .bind(byte_size)
+    .bind(&sha256)
+    .bind(&storage_path)
+    .bind(note.as_deref())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE assets SET
+            original_filename = ?, extension = ?, mime_type = ?, byte_size = ?,
+            sha256 = ?, storage_path = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&original_filename)
+    .bind(&extension)
+    .bind(&mime_type)
+    .bind(byte_size)
+    .bind(&sha256)
+    .bind(&storage_path)
+    .bind(&now)
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    get_asset(pool, asset_id, false).await
+}
+
 pub async fn restore_asset_version(
     pool: &SqlitePool,
     asset_id: &str,
