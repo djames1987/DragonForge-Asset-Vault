@@ -1,4 +1,5 @@
 use crate::{
+    auth,
     backup,
     db,
     engine,
@@ -8,23 +9,24 @@ use crate::{
     tiering,
     error::{AppError, AppResult},
     models::{
-        AssetQuery, AssetRow, BackupCreateResponse, BackupStatusResponse, BackupVerifyResponse,
-        CheckoutRequest, CheckoutStatusResponse, EnginePreset, ProjectExportPlan,
-        CreateProjectRequest, DeleteResponse, HealthResponse,
+        AssetQuery, AssetRow, AuthMeResponse, BackupCreateResponse, BackupStatusResponse,
+        BackupVerifyResponse, CheckoutRequest, CheckoutStatusResponse, CreateProjectRequest,
+        CreateUserRequest, DeleteResponse, EnginePreset, HealthResponse, ProjectExportPlan,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
         SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, StorageTierMoveResponse,
-        StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UploadMetadata,
-        UploadResponse,
+        StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest,
+        UploadMetadata, UploadResponse, VaultUser,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
 };
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
+    middleware,
     routing::get,
     Json, Router,
 };
@@ -42,12 +44,19 @@ pub struct AppState {
     pub storage: Storage,
     pub semantic: crate::config::SemanticConfig,
     pub backup: crate::config::BackupConfig,
+    pub auth: crate::config::AuthConfig,
     pub database_filename: String,
 }
 
 pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth/me", get(auth_me))
+        .route("/api/users", get(list_users).post(create_user))
+        .route(
+            "/api/users/:id",
+            get(get_user).patch(update_user).delete(delete_user),
+        )
         .route("/api/stats", get(stats))
         .route("/api/backups", get(backup_status).post(create_backup))
         .route("/api/backups/:id/verify", axum::routing::post(verify_backup))
@@ -113,17 +122,95 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            Arc::new(state.clone()),
+            auth::middleware,
+        ))
         .with_state(Arc::new(state))
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health(
+    State(state): State<Arc<AppState>>,
+) -> Json<HealthResponse> {
     info!("health check");
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
         phase: 14,
         version: env!("CARGO_PKG_VERSION"),
+        auth_enabled: state.auth.enabled,
     })
+}
+
+async fn auth_me(
+    Extension(context): Extension<auth::AuthContext>,
+) -> Json<AuthMeResponse> {
+    Json(context.me_response())
+}
+
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<Vec<VaultUser>>> {
+    Ok(Json(db::list_users(&state.db).await?))
+}
+
+async fn get_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<VaultUser>> {
+    Ok(Json(db::get_user(&state.db, &id).await?))
+}
+
+async fn create_user(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateUserRequest>,
+) -> AppResult<(StatusCode, Json<VaultUser>)> {
+    let token_hash = auth::hash_token(&request.token)?;
+    let user = db::create_user(&state.db, request, token_hash).await?;
+    info!(username = %user.username, role = %user.role, "vault user created");
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+async fn update_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateUserRequest>,
+) -> AppResult<Json<VaultUser>> {
+    let current = db::get_user(&state.db, &id).await?;
+    if current.role == "administrator" {
+        let removes_admin = request.enabled == Some(false)
+            || request.role.as_ref().is_some_and(|role| !role.is_admin());
+        if removes_admin && db::count_enabled_administrators(&state.db).await? <= 1 {
+            return Err(AppError::Conflict(
+                "cannot disable or demote the last enabled Administrator".to_string(),
+            ));
+        }
+    }
+    let token_hash = match request.token.as_deref() {
+        Some(token) => Some(auth::hash_token(token)?),
+        None => None,
+    };
+    let user = db::update_user(&state.db, &id, request, token_hash).await?;
+    info!(username = %user.username, role = %user.role, enabled = user.enabled, "vault user updated");
+    Ok(Json(user))
+}
+
+async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let current = db::get_user(&state.db, &id).await?;
+    if current.role == "administrator"
+        && current.enabled
+        && db::count_enabled_administrators(&state.db).await? <= 1
+    {
+        return Err(AppError::Conflict(
+            "cannot delete the last enabled Administrator".to_string(),
+        ));
+    }
+    db::delete_user(&state.db, &id).await?;
+    info!(username = %current.username, "vault user deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn request_identity(headers: &HeaderMap) -> AppResult<(String, String)> {
@@ -214,8 +301,12 @@ async fn get_checkout(
 async fn checkout_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(request): Json<CheckoutRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<CheckoutRequest>,
 ) -> AppResult<impl IntoResponse> {
+    let (holder, workstation) = request_identity(&headers)?;
+    request.holder = holder;
+    request.workstation = workstation;
     let checkout = db::checkout_asset(&state.db, &id, request).await?;
     info!(
         asset_id = %id,
