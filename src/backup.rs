@@ -19,6 +19,7 @@ pub async fn create_backup(
     db: &SqlitePool,
     data_root: &Path,
     database_filename: &str,
+    archive_root: Option<&Path>,
     config: &BackupConfig,
 ) -> AppResult<BackupCreateResponse> {
     let backup_root = absoluteish(&config.directory)?;
@@ -70,6 +71,20 @@ pub async fn create_backup(
         .await?;
         preview_files = copied.len();
         files.extend(copied);
+    }
+
+    if let Some(archive_root) = archive_root {
+        let archive_assets = archive_root.join("assets");
+        if fs::try_exists(&archive_assets).await? {
+            let copied = copy_tree_with_manifest(
+                &archive_assets,
+                &staging_dir.join("archive").join("assets"),
+                &staging_dir,
+            )
+            .await?;
+            asset_files += copied.len();
+            files.extend(copied);
+        }
     }
 
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
