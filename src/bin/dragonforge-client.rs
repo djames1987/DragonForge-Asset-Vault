@@ -297,6 +297,21 @@ struct ProjectAsset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectAssetBrowserEntry {
+    asset: Asset,
+    pinned_version: i64,
+    relative_path: Option<String>,
+    added_at: String,
+    outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectAssetCount {
+    project_id: String,
+    asset_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum LicenseStatus {
     Complete,
@@ -511,6 +526,16 @@ enum ClientEvent {
     },
     Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
+    ProjectAssetCounts(Result<Vec<ProjectAssetCount>, String>),
+    ProjectBrowserLoaded {
+        project_id: String,
+        result: Result<Vec<ProjectAssetBrowserEntry>, String>,
+    },
+    ProjectAssetLatest {
+        project_id: String,
+        asset_id: String,
+        result: Result<PathBuf, String>,
+    },
     Upload(Result<UploadResponse, String>),
     Update(Result<Asset, String>),
     Delete {
@@ -568,6 +593,9 @@ struct DragonForgeClient {
     current_view: AppView,
     assets: Vec<Asset>,
     projects: Vec<Project>,
+    project_asset_counts: HashMap<String, i64>,
+    project_browser_entries: Vec<ProjectAssetBrowserEntry>,
+    project_filter_id: Option<String>,
     selected_id: Option<String>,
     selected_project_id: Option<String>,
     search: String,
@@ -650,6 +678,9 @@ impl DragonForgeClient {
             current_view,
             assets: Vec::new(),
             projects: Vec::new(),
+            project_asset_counts: HashMap::new(),
+            project_browser_entries: Vec::new(),
+            project_filter_id: None,
             selected_id: None,
             selected_project_id: None,
             search: String::new(),
@@ -849,6 +880,8 @@ impl DragonForgeClient {
             self.current_view == AppView::Library && !self.deleted_only,
             "▦   All Assets",
         ) {
+            self.project_filter_id = None;
+            self.project_browser_entries.clear();
             self.deleted_only = false;
             self.navigate(AppView::Library);
         }
@@ -876,6 +909,13 @@ impl DragonForgeClient {
 
         if nav_button(ui, self.current_view == AppView::Projects, "▣   Projects") {
             self.navigate(AppView::Projects);
+        }
+        for project in self.projects.clone().into_iter().take(6) {
+            let count = self.project_asset_counts.get(&project.id).copied().unwrap_or(0);
+            let selected = self.project_filter_id.as_deref() == Some(project.id.as_str());
+            if nav_button(ui, selected, &format!("    {}   {}", project.name, count)) {
+                self.open_project_browser(project.id.clone());
+            }
         }
         if nav_button(ui, self.current_view == AppView::Activity, "≋   Activity") {
             self.navigate(AppView::Activity);
@@ -1546,7 +1586,123 @@ impl DragonForgeClient {
         });
     }
 
+    fn refresh_project_asset_counts(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<ProjectAssetCount>, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/projects/asset-counts"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::ProjectAssetCounts(result));
+        });
+    }
+
+    fn open_project_browser(&mut self, project_id: String) {
+        self.selected_project_id = Some(project_id.clone());
+        self.project_filter_id = Some(project_id);
+        self.deleted_only = false;
+        self.selected_id = None;
+        self.search.clear();
+        self.category_filter.clear();
+        self.tag_filter.clear();
+        self.extension_filter.clear();
+        self.license_filter = "All".to_string();
+        self.current_view = AppView::Library;
+        self.settings.last_view = AppView::Library.key().to_string();
+        let _ = save_settings(&self.settings);
+        self.refresh_project_browser();
+    }
+
+    fn refresh_project_browser(&mut self) {
+        let Some(project_id) = self.project_filter_id.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let search = self.search.trim().to_ascii_lowercase();
+        let category = self.category_filter.trim().to_string();
+        let tag = self.tag_filter.trim().to_string();
+        let extension = self.extension_filter.trim().trim_start_matches('.').to_ascii_lowercase();
+        let license_filter = self.license_filter.clone();
+        self.busy_count += 1;
+        self.status = "Loading project assets...".to_string();
+
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<ProjectAssetBrowserEntry>, String> {
+                let mut entries: Vec<ProjectAssetBrowserEntry> = Self::api_client()?
+                    .get(format!("{base}/api/projects/{project_id}/asset-browser"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())?;
+
+                if !search.is_empty() {
+                    entries.retain(|entry| {
+                        let asset = &entry.asset;
+                        asset.name.to_ascii_lowercase().contains(&search)
+                            || asset.original_filename.to_ascii_lowercase().contains(&search)
+                            || asset.category.as_deref().unwrap_or("").to_ascii_lowercase().contains(&search)
+                            || asset.creator.as_deref().unwrap_or("").to_ascii_lowercase().contains(&search)
+                            || asset.tags.iter().any(|value| value.to_ascii_lowercase().contains(&search))
+                    });
+                }
+                if !category.is_empty() {
+                    entries.retain(|entry| entry.asset.category.as_deref().unwrap_or("").eq_ignore_ascii_case(&category));
+                }
+                if !tag.is_empty() {
+                    entries.retain(|entry| entry.asset.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)));
+                }
+                if !extension.is_empty() {
+                    entries.retain(|entry| entry.asset.extension.as_deref().unwrap_or("").eq_ignore_ascii_case(&extension));
+                }
+                if license_filter != "All" {
+                    entries.retain(|entry| license_status_label(&entry.asset) == license_filter);
+                }
+                Ok(entries)
+            })();
+            let _ = tx.send(ClientEvent::ProjectBrowserLoaded { project_id, result });
+        });
+    }
+
+    fn update_selected_project_asset_latest(&mut self) {
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select a project asset first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let project_id = project.id.clone();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Updating {} to latest in {}...", asset.name, project.name);
+        thread::spawn(move || {
+            let result = project_sync::add_current_asset(&base, &project, &asset);
+            let _ = tx.send(ClientEvent::ProjectAssetLatest {
+                project_id,
+                asset_id,
+                result,
+            });
+        });
+    }
+
     fn refresh_assets(&mut self) {
+        if self.project_filter_id.is_some() {
+            self.refresh_project_browser();
+            return;
+        }
         let tx = self.tx.clone();
         let base = self.base_url();
         let search = self.search.trim().to_string();
@@ -1677,6 +1833,7 @@ impl DragonForgeClient {
             })();
             let _ = tx.send(ClientEvent::Projects(result));
         });
+        self.refresh_project_asset_counts();
     }
 
     fn begin_upload(&mut self, path: PathBuf) {
@@ -2578,6 +2735,56 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::ProjectAssetCounts(result) => {
+                    match result {
+                        Ok(counts) => {
+                            self.project_asset_counts = counts
+                                .into_iter()
+                                .map(|item| (item.project_id, item.asset_count))
+                                .collect();
+                        }
+                        Err(err) => warn!(error = %err, "project asset counts unavailable"),
+                    }
+                }
+                ClientEvent::ProjectBrowserLoaded { project_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(entries) => {
+                            if self.project_filter_id.as_deref() == Some(project_id.as_str()) {
+                                self.project_browser_entries = entries.clone();
+                                self.assets = entries.into_iter().map(|entry| entry.asset).collect();
+                                self.selected_id = self
+                                    .selected_id
+                                    .clone()
+                                    .filter(|id| self.assets.iter().any(|asset| &asset.id == id));
+                                self.status = format!("{} project assets loaded", self.assets.len());
+                                self.request_missing_thumbnails();
+                            }
+                        }
+                        Err(err) => self.status = format!("Project asset browser failed: {err}"),
+                    }
+                }
+                ClientEvent::ProjectAssetLatest {
+                    project_id,
+                    asset_id,
+                    result,
+                } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(path) => {
+                            self.status = format!("Project asset updated to latest at {}", path.display());
+                            if let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() {
+                                let _ = write_project_license_files(&self.base_url(), &project);
+                            }
+                            self.selected_id = Some(asset_id);
+                            self.refresh_project_asset_counts();
+                            if self.project_filter_id.as_deref() == Some(project_id.as_str()) {
+                                self.refresh_project_browser();
+                            }
+                        }
+                        Err(err) => self.status = format!("Project asset update failed: {err}"),
+                    }
+                }
                 ClientEvent::Projects(result) => match result {
                     Ok(projects) => {
                         info!(count = projects.len(), "project refresh completed");
@@ -2705,6 +2912,10 @@ impl DragonForgeClient {
                         Ok(path) => {
                             info!(project_id = %project_id, asset_id = %asset_id, path = %path.display(), "asset added to project");
                             self.status = format!("Added asset to project: {}", path.display());
+                            self.refresh_project_asset_counts();
+                            if self.project_filter_id.as_deref() == Some(project_id.as_str()) {
+                                self.refresh_project_browser();
+                            }
                         }
                         Err(err) => self.status = format!("Add to project failed: {err}"),
                     }
@@ -2719,6 +2930,11 @@ impl DragonForgeClient {
                         Ok(message) => {
                             info!(project_id = %project_id, asset_id = %asset_id, "asset removed from project");
                             self.status = message;
+                            self.refresh_project_asset_counts();
+                            if self.project_filter_id.as_deref() == Some(project_id.as_str()) {
+                                self.selected_id = None;
+                                self.refresh_project_browser();
+                            }
                         }
                         Err(err) => {
                             warn!(project_id = %project_id, asset_id = %asset_id, error = %err, "remove from project failed");
@@ -2864,14 +3080,21 @@ impl DragonForgeClient {
 
     fn filter_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let heading = if let Some(project_id) = self.project_filter_id.as_deref() {
+                self.projects
+                    .iter()
+                    .find(|project| project.id == project_id)
+                    .map(|project| project.name.as_str())
+                    .unwrap_or("Project Assets")
+            } else if self.deleted_only {
+                "Recycle Bin"
+            } else {
+                "All Assets"
+            };
             ui.heading(
-                egui::RichText::new(if self.deleted_only {
-                    "Recycle Bin"
-                } else {
-                    "All Assets"
-                })
-                .size(22.0)
-                .strong(),
+                egui::RichText::new(heading)
+                    .size(22.0)
+                    .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -2897,9 +3120,19 @@ impl DragonForgeClient {
             });
         });
         ui.label(
-            egui::RichText::new(format!("{} assets", self.assets.len()))
-                .color(Self::muted_text()),
+            egui::RichText::new(if self.project_filter_id.is_some() {
+                format!("{} linked assets", self.assets.len())
+            } else {
+                format!("{} assets", self.assets.len())
+            })
+            .color(Self::muted_text()),
         );
+        if self.project_filter_id.is_some() && ui.button("← All Assets").clicked() {
+            self.project_filter_id = None;
+            self.project_browser_entries.clear();
+            self.selected_id = None;
+            self.refresh_assets();
+        }
         ui.add_space(10.0);
 
         let search = ui.add_sized(
@@ -2913,12 +3146,14 @@ impl DragonForgeClient {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("phase161_search_mode")
-                .selected_text(format!("{} Search", self.search_mode))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart Search");
-                    ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword Search");
-                });
+            if self.project_filter_id.is_none() {
+                egui::ComboBox::from_id_salt("phase161_search_mode")
+                    .selected_text(format!("{} Search", self.search_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart Search");
+                        ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword Search");
+                    });
+            }
 
             if ui
                 .selectable_label(self.settings.show_filters, "Filters")
@@ -3034,10 +3269,27 @@ impl DragonForgeClient {
                                         .color(Self::muted_text()),
                                     );
 
-                                    let mut metadata = asset
-                                        .category
-                                        .clone()
-                                        .unwrap_or_else(|| "Uncategorized".to_string());
+                                    let mut metadata = if let Some(entry) = self
+                                        .project_browser_entries
+                                        .iter()
+                                        .find(|entry| entry.asset.id == asset.id)
+                                    {
+                                        let mut value = format!(
+                                            "Pinned v{} · Latest v{}",
+                                            entry.pinned_version,
+                                            asset.current_version
+                                        );
+                                        value.push_str(if entry.outdated { " · OUTDATED" } else { " · CURRENT" });
+                                        if let Some(path) = entry.relative_path.as_deref() {
+                                            value.push_str(&format!(" · {path}"));
+                                        }
+                                        value
+                                    } else {
+                                        asset
+                                            .category
+                                            .clone()
+                                            .unwrap_or_else(|| "Uncategorized".to_string())
+                                    };
                                     if let Some(Some(checkout)) = self.checkout_status.get(&asset.id) {
                                         metadata.push_str(&format!(" · checked out by {}", checkout.holder));
                                     }
@@ -3328,6 +3580,39 @@ impl DragonForgeClient {
                     .map(|project| project.name.clone())
                     .unwrap_or_else(|| "No project selected".to_string());
                 ui.label(project_name);
+
+                if let Some(entry) = self
+                    .project_browser_entries
+                    .iter()
+                    .find(|entry| entry.asset.id == asset.id)
+                    .cloned()
+                {
+                    ui.label(format!(
+                        "Pinned version: v{} · Vault latest: v{}",
+                        entry.pinned_version, asset.current_version
+                    ));
+                    if let Some(path) = entry.relative_path.as_deref() {
+                        ui.small(format!("Export path: {path}"));
+                    }
+                    if entry.outdated {
+                        ui.label(
+                            egui::RichText::new("Update available")
+                                .strong()
+                                .color(Self::accent()),
+                        );
+                        if ui
+                            .add_enabled(
+                                can_write && self.busy_count == 0,
+                                egui::Button::new("Update This Asset to Latest"),
+                            )
+                            .clicked()
+                        {
+                            self.update_selected_project_asset_latest();
+                        }
+                    } else {
+                        ui.small("Project pin is current.");
+                    }
+                }
 
                 ui.horizontal(|ui| {
                     if ui
@@ -3671,13 +3956,17 @@ impl DragonForgeClient {
                         if ui.selectable_label(selected, &project.name).clicked() {
                             self.selected_project_id = Some(project.id.clone());
                         }
-                        ui.label(format!("{} · {}", project.engine, project.local_path));
+                        let count = self.project_asset_counts.get(&project.id).copied().unwrap_or(0);
+                        ui.label(format!("{} assets · {} · {}", count, project.engine, project.local_path));
                     });
                     if let Some(description) = project.description.as_deref().filter(|v| !v.is_empty()) {
                         ui.small(description);
                     }
                     if selected {
                         ui.horizontal_wrapped(|ui| {
+                            if ui.button("Browse Assets").clicked() {
+                                self.open_project_browser(project.id.clone());
+                            }
                             if ui.button("Check Sync").clicked() {
                                 self.check_selected_project_sync();
                             }
