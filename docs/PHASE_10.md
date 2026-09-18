@@ -144,3 +144,19 @@ Avoiding online in-place restore prevents accidental destruction of a running va
 10. If a replication target is configured, confirm the same backup appears there and has been verified.
 11. Create more backups than the retention count in a small test configuration and confirm old snapshots are pruned.
 12. Send client/server logs for Phase 10 validation.
+
+
+## Phase 14 archive-tier integration
+
+When `storage.archive_dir` is configured, verified Phase 10 snapshots also include archived binary objects:
+
+```text
+dragonforge-<timestamp>/
+├── database/
+├── assets/
+├── previews/
+└── archive/
+    └── assets/
+```
+
+During disaster recovery, restore `assets/` and `previews/` to the hot `storage.data_dir`, and restore `archive/assets/` to the configured `storage.archive_dir`. The SQLite catalog may contain `archive://...` storage references, so omitting the archive portion would make those assets unavailable.
