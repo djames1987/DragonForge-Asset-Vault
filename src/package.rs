@@ -1,10 +1,15 @@
-use crate::error::{AppError, AppResult};
+use crate::{
+    error::{AppError, AppResult},
+    models::PackageFile,
+    storage::Storage,
+};
 use std::{
     collections::HashSet,
     fs::File,
     io::Read,
     path::{Component, Path, PathBuf},
 };
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct ExtractedEntry {
@@ -22,6 +27,51 @@ pub struct ExtractedPackage {
     pub entries: Vec<ExtractedEntry>,
     pub referenced_dependencies: Vec<String>,
     pub missing_dependencies: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct StoredPackage {
+    pub primary_path: String,
+    pub files: Vec<PackageFile>,
+    pub referenced_dependencies: Vec<String>,
+    pub missing_dependencies: Vec<String>,
+}
+
+pub async fn store_extracted_package(
+    storage: &Storage,
+    asset_id: &str,
+    version_number: i64,
+    package: ExtractedPackage,
+) -> AppResult<StoredPackage> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut files = Vec::with_capacity(package.entries.len());
+
+    for entry in package.entries {
+        let (sha256, storage_path) = storage
+            .store_bytes(&entry.bytes, entry.extension.as_deref())
+            .await?;
+        files.push(PackageFile {
+            id: Uuid::new_v4().to_string(),
+            asset_id: asset_id.to_string(),
+            version_number,
+            relative_path: entry.relative_path,
+            original_filename: entry.original_filename,
+            extension: entry.extension,
+            mime_type: entry.mime_type,
+            byte_size: entry.bytes.len() as i64,
+            sha256,
+            storage_path,
+            is_primary: entry.is_primary,
+            created_at: now.clone(),
+        });
+    }
+
+    Ok(StoredPackage {
+        primary_path: package.primary_path,
+        files,
+        referenced_dependencies: package.referenced_dependencies,
+        missing_dependencies: package.missing_dependencies,
+    })
 }
 
 pub async fn extract_zip(
