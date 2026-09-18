@@ -8,7 +8,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, BackupCreateResponse, BackupStatusResponse, BackupVerifyResponse,
-        EnginePreset, ProjectExportPlan,
+        CheckoutRequest, CheckoutStatusResponse, EnginePreset, ProjectExportPlan,
         CreateProjectRequest, DeleteResponse, HealthResponse,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
@@ -62,6 +62,11 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         )
         .route("/api/assets/:id/download", get(download_asset))
         .route("/api/assets/:id/license-status", get(asset_license_status))
+        .route("/api/checkouts", get(list_checkouts))
+        .route(
+            "/api/assets/:id/checkout",
+            get(get_checkout).post(checkout_asset).delete(checkin_asset),
+        )
         .route("/api/assets/:id/semantic-index", axum::routing::post(reindex_asset_semantic))
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
         .route("/api/assets/:id/preview", get(asset_preview))
@@ -114,6 +119,95 @@ async fn health() -> Json<HealthResponse> {
         phase: 11,
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+fn request_identity(headers: &HeaderMap) -> AppResult<(String, String)> {
+    let holder = headers
+        .get("x-dragonforge-user")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let workstation = headers
+        .get("x-dragonforge-workstation")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if holder.is_empty() || workstation.is_empty() {
+        return Err(AppError::BadRequest(
+            "DragonForge user/workstation identity headers are required".to_string(),
+        ));
+    }
+    Ok((holder, workstation))
+}
+
+async fn ensure_asset_mutation_allowed(
+    state: &AppState,
+    headers: &HeaderMap,
+    asset_id: &str,
+) -> AppResult<()> {
+    let Some(checkout) = db::get_asset_checkout(&state.db, asset_id).await? else {
+        return Ok(());
+    };
+    let (holder, workstation) = request_identity(headers)?;
+    if checkout.holder == holder && checkout.workstation == workstation {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(format!(
+            "asset is checked out by {}@{}",
+            checkout.holder, checkout.workstation
+        )))
+    }
+}
+
+async fn list_checkouts(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<impl IntoResponse> {
+    Ok(Json(db::list_asset_checkouts(&state.db).await?))
+}
+
+async fn get_checkout(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let checkout = db::get_asset_checkout(&state.db, &id).await?;
+    Ok(Json(CheckoutStatusResponse {
+        asset_id: id,
+        checkout,
+    }))
+}
+
+async fn checkout_asset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<CheckoutRequest>,
+) -> AppResult<impl IntoResponse> {
+    let checkout = db::checkout_asset(&state.db, &id, request).await?;
+    info!(
+        asset_id = %id,
+        holder = %checkout.holder,
+        workstation = %checkout.workstation,
+        "asset checked out"
+    );
+    Ok((StatusCode::CREATED, Json(checkout)))
+}
+
+async fn checkin_asset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<impl IntoResponse> {
+    let (holder, workstation) = request_identity(&headers)?;
+    db::release_asset_checkout(&state.db, &id, &holder, &workstation).await?;
+    info!(
+        asset_id = %id,
+        holder = %holder,
+        workstation = %workstation,
+        "asset checked in"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn refresh_semantic_index_nonfatal(state: &AppState, asset: &crate::models::Asset) {
@@ -678,9 +772,11 @@ async fn upload_asset(
 async fn update_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateAssetRequest>,
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset metadata update requested");
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     let asset = db::update_asset(&state.db, &id, request).await?;
     refresh_semantic_index_nonfatal(&state, &asset).await;
     info!(asset_id = %id, "asset metadata updated");
@@ -690,11 +786,14 @@ async fn update_asset(
 async fn delete_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset soft delete requested");
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     db::soft_delete(&state.db, &id).await?;
     db::delete_semantic_embedding(&state.db, &id).await?;
-    info!(asset_id = %id, "asset soft deleted; semantic index removed");
+    db::clear_asset_checkout(&state.db, &id).await?;
+    info!(asset_id = %id, "asset soft deleted; semantic index and checkout removed");
     Ok(Json(DeleteResponse { id, deleted: true }))
 }
 
@@ -832,8 +931,10 @@ async fn list_asset_versions(
 async fn upload_asset_version(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> AppResult<impl IntoResponse> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     let current = db::get_asset(&state.db, &id, false).await?;
     info!(asset_id = %id, current_version = current.current_version, "new asset version upload requested");
 
@@ -956,9 +1057,11 @@ async fn download_asset_version(
 async fn restore_asset_version(
     State(state): State<Arc<AppState>>,
     Path((id, version)): Path<(String, i64)>,
+    headers: HeaderMap,
     Json(request): Json<RestoreVersionRequest>,
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, source_version = version, "asset version restore requested");
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     let asset = db::restore_asset_version(&state.db, &id, version, request.note).await?;
 
     if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
@@ -1119,8 +1222,10 @@ async fn get_package_version_manifest(
 async fn upload_package_version(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> AppResult<impl IntoResponse> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     let current = db::get_asset(&state.db, &id, false).await?;
     let mut incoming: Option<IncomingFile> = None;
     let mut primary_path: Option<String> = None;
@@ -1255,8 +1360,10 @@ async fn build_package_manifest(
 async fn restore_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset restore requested");
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     db::restore_asset(&state.db, &id).await?;
     let restored_asset = db::get_asset(&state.db, &id, false).await?;
     refresh_semantic_index_nonfatal(&state, &restored_asset).await;
