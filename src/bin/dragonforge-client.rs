@@ -727,9 +727,16 @@ impl DragonForgeClient {
                 }
                 ClientEvent::Thumbnail { asset_id, result } => {
                     self.thumbnail_pending.remove(&asset_id);
-                    if let Ok(bytes) = result {
-                        if let Err(err) = self.install_thumbnail(ctx, &asset_id, &bytes) {
-                            warn!(asset_id = %asset_id, error = %err, "thumbnail decode failed");
+                    match result {
+                        Ok(bytes) => {
+                            if let Err(err) = self.install_thumbnail(ctx, &asset_id, &bytes) {
+                                warn!(asset_id = %asset_id, error = %err, "preview decode failed");
+                            } else {
+                                info!(asset_id = %asset_id, byte_size = bytes.len(), "preview loaded");
+                            }
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "preview fetch failed");
                         }
                     }
                 }
