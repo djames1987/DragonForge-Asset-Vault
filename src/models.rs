@@ -308,3 +308,58 @@ pub struct SemanticEmbeddingRow {
     pub embedding_json: String,
     pub indexed_at: String,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupFileEntry {
+    pub relative_path: String,
+    pub byte_size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupManifest {
+    pub format_version: u32,
+    pub backup_id: String,
+    pub created_at: String,
+    pub dragonforge_version: String,
+    pub database_file: String,
+    pub files: Vec<BackupFileEntry>,
+    pub total_bytes: u64,
+    pub asset_files: usize,
+    pub preview_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSummary {
+    pub backup_id: String,
+    pub created_at: String,
+    pub path: String,
+    pub total_bytes: u64,
+    pub files: usize,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupCreateResponse {
+    pub backup: BackupSummary,
+    pub replicated_to: Vec<String>,
+    pub replication_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupVerifyResponse {
+    pub backup_id: String,
+    pub valid: bool,
+    pub checked_files: usize,
+    pub missing_files: Vec<String>,
+    pub corrupt_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupStatusResponse {
+    pub backup_directory: String,
+    pub replication_targets: Vec<String>,
+    pub keep: usize,
+    pub backups: Vec<BackupSummary>,
+}
