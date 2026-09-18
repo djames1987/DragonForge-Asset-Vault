@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 8 — Licensing, Attribution, and Project Credits**
+**Phase 8.1 — Project Asset Removal**
 
 ### Server
 
@@ -33,12 +33,14 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - package/dependency viewer
 - Version History
 - project export
+- safe **Remove from Project** for single assets and packages
 - license preset selector
 - license health badges
 - license-status filter
 - attribution warnings
 - automatic `CREDITS.txt`
 - automatic JSON and CSV license manifests
+- confirmation + rollback-aware project asset removal
 - manual **Refresh Credits / License Manifest**
 - persistent daily logs
 
