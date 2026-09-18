@@ -1,6 +1,7 @@
 mod backup;
 mod config;
 mod db;
+mod engine;
 mod error;
 mod logging;
 mod licensing;
@@ -36,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 10,
+        phase = 11,
         log_dir = %log_dir.display(),
         "DragonForge server starting"
     );
@@ -72,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind DragonForge server to {address}"))?;
 
-    info!(%address, "DragonForge Asset Vault Phase 10 is online");
+    info!(%address, "DragonForge Asset Vault Phase 11 is online");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
