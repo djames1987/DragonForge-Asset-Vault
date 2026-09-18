@@ -81,7 +81,7 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/projects/:id/license-report", get(project_license_report))
         .route(
             "/api/projects/:id/assets/:asset_id",
-            axum::routing::delete(remove_project_asset),
+            get(get_project_asset_link).delete(remove_project_asset),
         )
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .layer(CorsLayer::permissive())
@@ -1033,6 +1033,14 @@ async fn add_project_asset(
         "project asset registered"
     );
     Ok((StatusCode::CREATED, Json(link)))
+}
+
+async fn get_project_asset_link(
+    State(state): State<Arc<AppState>>,
+    Path((id, asset_id)): Path<(String, String)>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, asset_id = %asset_id, "project asset link requested");
+    Ok(Json(db::get_project_asset_link(&state.db, &id, &asset_id).await?))
 }
 
 async fn remove_project_asset(
