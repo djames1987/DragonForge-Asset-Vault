@@ -138,7 +138,7 @@ async fn health(
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 14,
+        phase: 15,
         version: env!("CARGO_PKG_VERSION"),
         auth_enabled: state.auth.enabled,
     })
@@ -170,6 +170,7 @@ async fn export_audit(
         "occurred_at,username,role,workstation,action,method,path,target_type,target_id,result,status_code,detail\n",
     );
     for event in &events {
+        let status_code = event.status_code.to_string();
         let fields = [
             event.occurred_at.as_str(),
             event.actor_username.as_deref().unwrap_or(""),
@@ -181,7 +182,7 @@ async fn export_audit(
             event.target_type.as_deref().unwrap_or(""),
             event.target_id.as_deref().unwrap_or(""),
             event.result.as_str(),
-            &event.status_code.to_string(),
+            status_code.as_str(),
             event.detail.as_deref().unwrap_or(""),
         ];
         csv.push_str(
