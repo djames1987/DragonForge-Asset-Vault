@@ -24,6 +24,43 @@ struct HealthResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticStatusResponse {
+    enabled: bool,
+    ollama_reachable: bool,
+    model: String,
+    indexed_assets: i64,
+    total_active_assets: i64,
+    stale_assets: i64,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSearchResult {
+    asset: Asset,
+    semantic_score: f32,
+    keyword_score: f32,
+    combined_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticSearchResponse {
+    query: String,
+    mode: String,
+    model: String,
+    indexed_assets: i64,
+    results: Vec<SemanticSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReindexResponse {
+    requested: usize,
+    indexed: usize,
+    failed: usize,
+    model: String,
+    failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Asset {
     id: String,
     name: String,
@@ -231,7 +268,9 @@ impl Default for ProjectForm {
 
 enum ClientEvent {
     Health(Result<HealthResponse, String>),
-    Assets(Result<Vec<Asset>, String>),
+    SemanticStatus(Result<SemanticStatusResponse, String>),
+    SemanticReindex(Result<ReindexResponse, String>),
+    Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
     Upload(Result<UploadResponse, String>),
     Update(Result<Asset, String>),
@@ -296,6 +335,8 @@ struct DragonForgeClient {
     tag_filter: String,
     extension_filter: String,
     license_filter: String,
+    search_mode: String,
+    semantic_status: Option<SemanticStatusResponse>,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -348,6 +389,8 @@ impl DragonForgeClient {
             tag_filter: String::new(),
             extension_filter: String::new(),
             license_filter: "All".to_string(),
+            search_mode: "Smart".to_string(),
+            semantic_status: None,
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -377,6 +420,7 @@ impl DragonForgeClient {
 
         info!("DragonForge desktop client initialized");
         app.check_server();
+        app.refresh_semantic_status();
         app.refresh_assets();
         app.refresh_projects();
         app
@@ -416,6 +460,45 @@ impl DragonForgeClient {
         });
     }
 
+    fn refresh_semantic_status(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<SemanticStatusResponse, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/search/semantic/status"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::SemanticStatus(result));
+        });
+    }
+
+    fn reindex_semantic_search(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        self.status = "Reindexing semantic search with Ollama...".to_string();
+        info!("semantic reindex started");
+        thread::spawn(move || {
+            let result = (|| -> Result<ReindexResponse, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/search/semantic/reindex"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::SemanticReindex(result));
+        });
+    }
+
     fn refresh_assets(&mut self) {
         let tx = self.tx.clone();
         let base = self.base_url();
@@ -426,12 +509,15 @@ impl DragonForgeClient {
             .extension_filter
             .trim()
             .trim_start_matches('.')
-            .to_string();
+            .to_ascii_lowercase();
         let license_filter = self.license_filter.clone();
+        let search_mode = self.search_mode.clone();
         let deleted_only = self.deleted_only;
         self.busy_count += 1;
         self.status = if deleted_only {
             "Loading recycle bin...".to_string()
+        } else if search_mode == "Smart" && !search.is_empty() {
+            "Running smart search...".to_string()
         } else {
             "Loading assets...".to_string()
         };
@@ -439,6 +525,7 @@ impl DragonForgeClient {
         info!(
             server_url = %base,
             search = %search,
+            search_mode = %search_mode,
             category = %category,
             tag = %tag,
             extension = %extension,
@@ -448,35 +535,78 @@ impl DragonForgeClient {
         );
 
         thread::spawn(move || {
-            let result = (|| -> Result<Vec<Asset>, String> {
+            let result = (|| -> Result<(Vec<Asset>, Option<String>), String> {
                 let client = Self::api_client()?;
-                let mut request = client.get(format!("{base}/api/assets"));
-                if !search.is_empty() {
-                    request = request.query(&[("q", search.as_str())]);
+                let (mut assets, search_note) =
+                    if search_mode == "Smart" && !search.is_empty() && !deleted_only {
+                        let response: SemanticSearchResponse = client
+                            .get(format!("{base}/api/search/semantic"))
+                            .query(&[("q", search.as_str())])
+                            .send()
+                            .map_err(|e| e.to_string())?
+                            .error_for_status()
+                            .map_err(|e| e.to_string())?
+                            .json()
+                            .map_err(|e| e.to_string())?;
+                        let note = Some(format!(
+                            "{} search · {} indexed · model {}",
+                            if response.mode == "hybrid" { "Smart" } else { "Keyword fallback" },
+                            response.indexed_assets,
+                            response.model
+                        ));
+                        (
+                            response.results.into_iter().map(|result| result.asset).collect(),
+                            note,
+                        )
+                    } else {
+                        let mut request = client.get(format!("{base}/api/assets"));
+                        if !search.is_empty() {
+                            request = request.query(&[("q", search.as_str())]);
+                        }
+                        if !category.is_empty() {
+                            request = request.query(&[("category", category.as_str())]);
+                        }
+                        if !tag.is_empty() {
+                            request = request.query(&[("tag", tag.as_str())]);
+                        }
+                        if !extension.is_empty() {
+                            request = request.query(&[("extension", extension.as_str())]);
+                        }
+                        if deleted_only {
+                            request = request.query(&[("deleted_only", "true")]);
+                        }
+                        let assets: Vec<Asset> = request
+                            .send()
+                            .map_err(|e| e.to_string())?
+                            .error_for_status()
+                            .map_err(|e| e.to_string())?
+                            .json()
+                            .map_err(|e| e.to_string())?;
+                        (assets, None)
+                    };
+
+                if search_mode == "Smart" && !search.is_empty() && !deleted_only {
+                    if !category.is_empty() {
+                        assets.retain(|asset| {
+                            asset.category.as_deref().unwrap_or("").eq_ignore_ascii_case(&category)
+                        });
+                    }
+                    if !tag.is_empty() {
+                        assets.retain(|asset| {
+                            asset.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag))
+                        });
+                    }
+                    if !extension.is_empty() {
+                        assets.retain(|asset| {
+                            asset.extension.as_deref().unwrap_or("").eq_ignore_ascii_case(&extension)
+                        });
+                    }
                 }
-                if !category.is_empty() {
-                    request = request.query(&[("category", category.as_str())]);
-                }
-                if !tag.is_empty() {
-                    request = request.query(&[("tag", tag.as_str())]);
-                }
-                if !extension.is_empty() {
-                    request = request.query(&[("extension", extension.as_str())]);
-                }
-                if deleted_only {
-                    request = request.query(&[("deleted_only", "true")]);
-                }
-                let mut assets: Vec<Asset> = request
-                    .send()
-                    .map_err(|e| e.to_string())?
-                    .error_for_status()
-                    .map_err(|e| e.to_string())?
-                    .json()
-                    .map_err(|e| e.to_string())?;
+
                 if license_filter != "All" {
                     assets.retain(|asset| license_status_label(asset) == license_filter);
                 }
-                Ok(assets)
+                Ok((assets, search_note))
             })();
             let _ = tx.send(ClientEvent::Assets(result));
         });
@@ -975,10 +1105,55 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::SemanticStatus(result) => {
+                    match result {
+                        Ok(status) => {
+                            info!(
+                                enabled = status.enabled,
+                                reachable = status.ollama_reachable,
+                                indexed = status.indexed_assets,
+                                total = status.total_active_assets,
+                                stale = status.stale_assets,
+                                model = %status.model,
+                                "semantic status loaded"
+                            );
+                            self.semantic_status = Some(status);
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "semantic status unavailable");
+                            self.semantic_status = None;
+                        }
+                    }
+                }
+                ClientEvent::SemanticReindex(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(
+                                requested = response.requested,
+                                indexed = response.indexed,
+                                failed = response.failed,
+                                model = %response.model,
+                                "semantic reindex completed"
+                            );
+                            self.status = format!(
+                                "Semantic index: {}/{} indexed, {} failed",
+                                response.indexed, response.requested, response.failed
+                            );
+                            self.refresh_semantic_status();
+                            self.refresh_assets();
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "semantic reindex failed");
+                            self.status = format!("Semantic reindex failed: {err}");
+                            self.refresh_semantic_status();
+                        }
+                    }
+                }
                 ClientEvent::Assets(result) => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
-                        Ok(assets) => {
+                        Ok((assets, search_note)) => {
                             info!(count = assets.len(), deleted_only = self.deleted_only, "asset refresh completed");
                             self.assets = assets;
                             if self
@@ -988,7 +1163,10 @@ impl DragonForgeClient {
                             {
                                 self.selected_id = None;
                             }
-                            self.status = format!("{} assets loaded", self.assets.len());
+                            self.status = match search_note {
+                                Some(note) => format!("{} · {} results", note, self.assets.len()),
+                                None => format!("{} assets loaded", self.assets.len()),
+                            };
                             self.request_missing_thumbnails();
                         }
                         Err(err) => {
@@ -1264,6 +1442,7 @@ impl DragonForgeClient {
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let _ = save_settings(&self.settings);
                 self.check_server();
+                self.refresh_semantic_status();
                 self.refresh_assets();
                 self.refresh_projects();
             }
@@ -1301,6 +1480,12 @@ impl DragonForgeClient {
                     .desired_width(160.0)
                     .hint_text("name, creator, license..."),
             );
+            egui::ComboBox::from_id_salt("search_mode")
+                .selected_text(&self.search_mode)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart");
+                    ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword");
+                });
             ui.label("Category");
             let category_response = ui.add(
                 egui::TextEdit::singleline(&mut self.category_filter)
@@ -1345,6 +1530,30 @@ impl DragonForgeClient {
                 self.extension_filter.clear();
                 self.license_filter = "All".to_string();
                 self.refresh_assets();
+            }
+
+            ui.separator();
+            let semantic_label = match &self.semantic_status {
+                Some(status) if status.ollama_reachable => format!(
+                    "AI: {}/{} indexed{}",
+                    status.indexed_assets,
+                    status.total_active_assets,
+                    if status.stale_assets > 0 {
+                        format!(" · {} stale", status.stale_assets)
+                    } else {
+                        String::new()
+                    }
+                ),
+                Some(status) if !status.enabled => "AI: disabled".to_string(),
+                Some(_) => "AI: Ollama offline".to_string(),
+                None => "AI: status unknown".to_string(),
+            };
+            ui.label(semantic_label);
+            if ui.button("Reindex AI Search").clicked() {
+                self.reindex_semantic_search();
+            }
+            if ui.button("AI Status").clicked() {
+                self.refresh_semantic_status();
             }
 
             let recycle_label = if self.deleted_only {
@@ -1985,7 +2194,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 8.1");
+                ui.label("DragonForge Client Phase 9");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -2680,7 +2889,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 8,
+        phase = 9,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
