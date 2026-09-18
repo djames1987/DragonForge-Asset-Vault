@@ -330,11 +330,74 @@ struct ProjectLicenseReport {
     csv_manifest: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum AppView {
+    Library,
+    Projects,
+    Activity,
+    Backups,
+    AiSearch,
+    Users,
+    Settings,
+}
+
+impl AppView {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Library => "library",
+            Self::Projects => "projects",
+            Self::Activity => "activity",
+            Self::Backups => "backups",
+            Self::AiSearch => "ai_search",
+            Self::Users => "users",
+            Self::Settings => "settings",
+        }
+    }
+
+    fn from_key(value: &str) -> Self {
+        match value {
+            "projects" => Self::Projects,
+            "activity" => Self::Activity,
+            "backups" => Self::Backups,
+            "ai_search" => Self::AiSearch,
+            "users" => Self::Users,
+            "settings" => Self::Settings,
+            _ => Self::Library,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Library => "Assets",
+            Self::Projects => "Projects",
+            Self::Activity => "Activity",
+            Self::Backups => "Backups",
+            Self::AiSearch => "AI Search",
+            Self::Users => "Users",
+            Self::Settings => "Settings",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
     server_url: String,
     #[serde(default)]
     api_token: String,
+    #[serde(default = "default_ui_scale")]
+    ui_scale: f32,
+    #[serde(default = "default_card_width")]
+    card_width: f32,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: f32,
+    #[serde(default = "default_inspector_width")]
+    inspector_width: f32,
+    #[serde(default = "default_last_view")]
+    last_view: String,
+    #[serde(default = "default_true")]
+    dark_mode: bool,
+    #[serde(default)]
+    show_filters: bool,
 }
 
 impl Default for ClientSettings {
@@ -342,6 +405,13 @@ impl Default for ClientSettings {
         Self {
             server_url: "http://127.0.0.1:8080".to_string(),
             api_token: String::new(),
+            ui_scale: default_ui_scale(),
+            card_width: default_card_width(),
+            sidebar_width: default_sidebar_width(),
+            inspector_width: default_inspector_width(),
+            last_view: default_last_view(),
+            dark_mode: true,
+            show_filters: false,
         }
     }
 }
@@ -495,6 +565,7 @@ enum ClientEvent {
 
 struct DragonForgeClient {
     settings: ClientSettings,
+    current_view: AppView,
     assets: Vec<Asset>,
     projects: Vec<Project>,
     selected_id: Option<String>,
@@ -572,9 +643,11 @@ impl DragonForgeClient {
             }
         };
 
+        let current_view = AppView::from_key(&settings.last_view);
         let (tx, rx) = mpsc::channel();
         let mut app = Self {
             settings,
+            current_view,
             assets: Vec::new(),
             projects: Vec::new(),
             selected_id: None,
@@ -647,6 +720,110 @@ impl DragonForgeClient {
         app.refresh_assets();
         app.refresh_projects();
         app
+    }
+
+    fn apply_phase16_style(&self, ctx: &egui::Context) {
+        ctx.set_pixels_per_point(self.settings.ui_scale.clamp(0.85, 1.5));
+        if self.settings.dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+        ctx.style_mut(|style| {
+            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+            style.spacing.button_padding = egui::vec2(12.0, 7.0);
+            style.spacing.interact_size.y = 30.0;
+        });
+    }
+
+    fn navigate(&mut self, view: AppView) {
+        self.current_view = view;
+        self.settings.last_view = view.key().to_string();
+        let _ = save_settings(&self.settings);
+        match view {
+            AppView::Library => self.refresh_assets(),
+            AppView::Projects => self.refresh_projects(),
+            AppView::Activity => self.refresh_activity(),
+            AppView::Backups => self.refresh_backup_status(),
+            AppView::AiSearch => self.refresh_semantic_status(),
+            AppView::Users if self.is_admin() => self.refresh_users(),
+            _ => {}
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("DRAGONFORGE");
+        ui.small("Asset Vault");
+        ui.add_space(14.0);
+
+        let nav = |ui: &mut egui::Ui, current: AppView, target: AppView, label: &str| {
+            ui.selectable_label(current == target, label).clicked()
+        };
+
+        ui.label(egui::RichText::new("LIBRARY").small().strong());
+        if nav(ui, self.current_view, AppView::Library, "▦  Assets") {
+            self.deleted_only = false;
+            self.navigate(AppView::Library);
+        }
+        if ui
+            .selectable_label(
+                self.current_view == AppView::Library && self.deleted_only,
+                "♲  Recycle Bin",
+            )
+            .clicked()
+        {
+            self.deleted_only = true;
+            self.selected_id = None;
+            self.current_view = AppView::Library;
+            self.settings.last_view = AppView::Library.key().to_string();
+            let _ = save_settings(&self.settings);
+            self.refresh_assets();
+        }
+
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("WORKSPACE").small().strong());
+        if nav(ui, self.current_view, AppView::Projects, "▣  Projects") {
+            self.navigate(AppView::Projects);
+        }
+        if nav(ui, self.current_view, AppView::Activity, "≋  Activity") {
+            self.navigate(AppView::Activity);
+        }
+
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("SYSTEM").small().strong());
+        if nav(ui, self.current_view, AppView::Backups, "◫  Backups") {
+            self.navigate(AppView::Backups);
+        }
+        if nav(ui, self.current_view, AppView::AiSearch, "✦  AI Search") {
+            self.navigate(AppView::AiSearch);
+        }
+        if self.is_admin() && nav(ui, self.current_view, AppView::Users, "♙  Users") {
+            self.navigate(AppView::Users);
+        }
+        if nav(ui, self.current_view, AppView::Settings, "⚙  Settings") {
+            self.navigate(AppView::Settings);
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            let role = self
+                .auth_me
+                .as_ref()
+                .and_then(|me| me.role.as_ref())
+                .map(UserRole::label)
+                .unwrap_or("Offline");
+            let user = self
+                .auth_me
+                .as_ref()
+                .and_then(|me| me.username.as_deref())
+                .unwrap_or("Not connected");
+            ui.small(format!("{user} · {role}"));
+            ui.small(match &self.health {
+                Some(h) if h.ok => format!("● Connected · v{}", h.version),
+                _ => "○ Disconnected".to_string(),
+            });
+            ui.separator();
+        });
     }
 
     fn workstation_identity() -> (String, String) {
@@ -937,7 +1114,9 @@ impl DragonForgeClient {
     fn open_asset_activity(&mut self, asset_id: &str) {
         self.audit_target_type = "asset".to_string();
         self.audit_target_id = asset_id.to_string();
-        self.show_activity = true;
+        self.current_view = AppView::Activity;
+        self.settings.last_view = AppView::Activity.key().to_string();
+        let _ = save_settings(&self.settings);
         self.refresh_activity();
     }
 
@@ -2543,217 +2722,60 @@ impl DragonForgeClient {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let is_admin = self.is_admin();
         ui.horizontal(|ui| {
-            ui.heading("DragonForge Asset Vault");
-            ui.separator();
-            ui.label("Server:");
-            let response = ui.text_edit_singleline(&mut self.settings.server_url);
-            ui.label("API Token:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.settings.api_token)
-                    .password(true)
-                    .desired_width(140.0)
-                    .hint_text("Phase 13 token")
-            );
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                let _ = save_settings(&self.settings);
-                self.check_server();
-                self.refresh_semantic_status();
-                self.refresh_backup_status();
-                self.refresh_engine_presets();
-                self.refresh_assets();
-                self.refresh_projects();
-            }
-            if ui.button("Connect").clicked() {
-                let _ = save_settings(&self.settings);
-                self.check_server();
-                self.refresh_auth_me();
-                self.refresh_semantic_status();
-                self.refresh_backup_status();
-                self.refresh_engine_presets();
-                self.refresh_assets();
-                self.refresh_projects();
-            }
-            if ui.button("Refresh").clicked() {
-                self.refresh_backup_status();
-                self.refresh_assets();
-                self.refresh_projects();
-            }
-            ui.separator();
-            let backup_label = match &self.backup_status {
-                Some(status) => match status.backups.first() {
-                    Some(latest) => format!(
-                        "Backup: {} · {}",
-                        latest.backup_id,
-                        human_size(latest.total_bytes as i64)
-                    ),
-                    None => "Backup: none".to_string(),
-                },
-                None => "Backup: status unknown".to_string(),
-            };
-            ui.label(backup_label);
-            if ui
-                .add_enabled(self.busy_count == 0 && is_admin, egui::Button::new("Create Backup"))
-                .clicked()
-            {
-                self.create_vault_backup();
-            }
-            if ui
-                .add_enabled(
-                    self.busy_count == 0
-                        && is_admin
-                        && self.backup_status.as_ref().is_some_and(|status| !status.backups.is_empty()),
-                    egui::Button::new("Verify Latest"),
-                )
-                .clicked()
-            {
-                self.verify_latest_backup();
-            }
-            if ui.button("Backup Status").clicked() {
-                self.refresh_backup_status();
-            }
-            if self.busy_count > 0 {
-                ui.spinner();
-            }
-        });
+            ui.heading(self.current_view.label());
+            ui.add_space(8.0);
 
-        ui.horizontal(|ui| {
-            let connection = match &self.health {
-                Some(h) if h.ok => format!("Connected · server phase {} · v{}", h.phase, h.version),
-                _ => "Not connected".to_string(),
-            };
-            ui.label(connection);
-            ui.separator();
-            if let Some(me) = &self.auth_me {
-                let auth_label = if me.enabled {
-                    format!(
-                        "User: {} · {}",
-                        me.username.as_deref().unwrap_or("unknown"),
-                        me.role.as_ref().map(UserRole::label).unwrap_or("unknown")
-                    )
-                } else {
-                    "Auth: disabled (legacy trusted-LAN mode)".to_string()
-                };
-                ui.label(auth_label);
-                if me.role.as_ref().is_some_and(|role| *role == UserRole::Administrator) && me.enabled {
-                    if ui.button("Manage Users").clicked() {
-                        self.show_users = true;
-                        self.refresh_users();
-                    }
+            if self.current_view == AppView::Library {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(330.0)
+                        .hint_text("Search assets, creators, tags, licenses..."),
+                );
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.refresh_assets();
+                }
+                if ui.button("Search").clicked() {
+                    self.refresh_assets();
+                }
+                if ui
+                    .selectable_label(self.settings.show_filters, "Filters")
+                    .clicked()
+                {
+                    self.settings.show_filters = !self.settings.show_filters;
+                    let _ = save_settings(&self.settings);
                 }
             }
-            ui.separator();
-            let (_, identity_workstation) = Self::workstation_identity();
-            ui.label(format!("Workstation: {}", identity_workstation));
-            ui.separator();
-            if ui.button("Activity").clicked() {
-                self.show_activity = true;
-                self.refresh_activity();
-            }
-            ui.separator();
-            ui.label(&self.status);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.busy_count > 0 {
+                    ui.spinner();
+                }
+                if ui.button("Refresh").clicked() {
+                    match self.current_view {
+                        AppView::Library => self.refresh_assets(),
+                        AppView::Projects => self.refresh_projects(),
+                        AppView::Activity => self.refresh_activity(),
+                        AppView::Backups => self.refresh_backup_status(),
+                        AppView::AiSearch => self.refresh_semantic_status(),
+                        AppView::Users => self.refresh_users(),
+                        AppView::Settings => self.check_server(),
+                    }
+                }
+                let connection = match &self.health {
+                    Some(h) if h.ok => format!("● v{}", h.version),
+                    _ => "○ Offline".to_string(),
+                };
+                ui.label(connection);
+            });
         });
     }
 
     fn filter_bar(&mut self, ui: &mut egui::Ui) {
         let can_write = self.can_write();
+
         ui.horizontal_wrapped(|ui| {
-            ui.label("Search");
-            let search_response = ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .desired_width(160.0)
-                    .hint_text("name, creator, license..."),
-            );
-            egui::ComboBox::from_id_salt("search_mode")
-                .selected_text(&self.search_mode)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart");
-                    ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword");
-                });
-            ui.label("Category");
-            let category_response = ui.add(
-                egui::TextEdit::singleline(&mut self.category_filter)
-                    .desired_width(110.0)
-                    .hint_text("texture"),
-            );
-            ui.label("Tag");
-            let tag_response = ui.add(
-                egui::TextEdit::singleline(&mut self.tag_filter)
-                    .desired_width(110.0)
-                    .hint_text("wood"),
-            );
-            ui.label("Type");
-            let extension_response = ui.add(
-                egui::TextEdit::singleline(&mut self.extension_filter)
-                    .desired_width(75.0)
-                    .hint_text("obj"),
-            );
-            ui.label("License");
-            egui::ComboBox::from_id_salt("license_status_filter")
-                .selected_text(&self.license_filter)
-                .show_ui(ui, |ui| {
-                    for value in ["All", "Complete", "Warning", "Unknown", "Custom"] {
-                        ui.selectable_value(&mut self.license_filter, value.to_string(), value);
-                    }
-                });
-
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Search").clicked()
-                || (enter
-                    && (search_response.has_focus()
-                        || category_response.has_focus()
-                        || tag_response.has_focus()
-                        || extension_response.has_focus()))
-            {
-                self.refresh_assets();
-            }
-            if ui.button("Clear").clicked() {
-                self.search.clear();
-                self.category_filter.clear();
-                self.tag_filter.clear();
-                self.extension_filter.clear();
-                self.license_filter = "All".to_string();
-                self.refresh_assets();
-            }
-
-            ui.separator();
-            let semantic_label = match &self.semantic_status {
-                Some(status) if status.ollama_reachable => format!(
-                    "AI: {}/{} indexed{}",
-                    status.indexed_assets,
-                    status.total_active_assets,
-                    if status.stale_assets > 0 {
-                        format!(" · {} stale", status.stale_assets)
-                    } else {
-                        String::new()
-                    }
-                ),
-                Some(status) if !status.enabled => "AI: disabled".to_string(),
-                Some(_) => "AI: Ollama offline".to_string(),
-                None => "AI: status unknown".to_string(),
-            };
-            ui.label(semantic_label);
-            if ui.add_enabled(can_write, egui::Button::new("Reindex AI Search")).clicked() {
-                self.reindex_semantic_search();
-            }
-            if ui.button("AI Status").clicked() {
-                self.refresh_semantic_status();
-            }
-
-            let recycle_label = if self.deleted_only {
-                "Back to Library"
-            } else {
-                "Recycle Bin"
-            };
-            if ui.button(recycle_label).clicked() {
-                self.deleted_only = !self.deleted_only;
-                self.selected_id = None;
-                self.refresh_assets();
-            }
-
-            ui.separator();
-            if ui.add_enabled(can_write, egui::Button::new("Add Asset")).clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("+ Add Asset")).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Select an asset to add")
                     .pick_file()
@@ -2761,7 +2783,10 @@ impl DragonForgeClient {
                     self.begin_upload(path);
                 }
             }
-            if ui.add_enabled(can_write, egui::Button::new("Add Package ZIP")).clicked() {
+            if ui
+                .add_enabled(can_write, egui::Button::new("+ Package ZIP"))
+                .clicked()
+            {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Select a multi-file asset ZIP")
                     .add_filter("ZIP package", &["zip"])
@@ -2770,159 +2795,117 @@ impl DragonForgeClient {
                     self.begin_package_import(path);
                 }
             }
-        });
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Project:");
-            let selected_name = self
-                .selected_project()
-                .map(|p| format!("{} ({})", p.name, p.engine))
-                .unwrap_or_else(|| "None selected".to_string());
-
-            egui::ComboBox::from_id_salt("project_selector")
-                .selected_text(selected_name)
+            ui.separator();
+            egui::ComboBox::from_id_salt("phase16_search_mode")
+                .selected_text(format!("{} Search", self.search_mode))
                 .show_ui(ui, |ui| {
-                    for project in &self.projects {
-                        ui.selectable_value(
-                            &mut self.selected_project_id,
-                            Some(project.id.clone()),
-                            format!("{} ({})", project.name, project.engine),
-                        );
-                    }
+                    ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart Search");
+                    ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword Search");
                 });
 
-            if ui.add_enabled(can_write, egui::Button::new("New Project")).clicked() {
-                self.show_project_create = true;
-            }
-            if ui
-                .add_enabled(
-                    self.selected_project_id.is_some(),
-                    egui::Button::new("Refresh Credits / License Manifest"),
-                )
-                .clicked()
-            {
-                self.refresh_project_license_files();
-            }
-            if ui
-                .add_enabled(
-                    self.selected_project_id.is_some() && self.busy_count == 0,
-                    egui::Button::new("Check Project Sync"),
-                )
-                .clicked()
-            {
-                self.check_selected_project_sync();
-            }
-            if ui
-                .add_enabled(
-                    can_write && self.selected_project_id.is_some() && self.busy_count == 0,
-                    egui::Button::new("Repair Pinned Files"),
-                )
-                .clicked()
-            {
-                self.repair_selected_project_sync();
-            }
-            if ui
-                .add_enabled(
-                    can_write && self.selected_project_id.is_some() && self.busy_count == 0,
-                    egui::Button::new("Update Project to Latest"),
-                )
-                .clicked()
-            {
-                self.update_selected_project_to_latest();
-            }
-
-            if ui
-                .add_enabled(
-                    can_write
-                        && self.selected_id.is_some()
-                        && self.selected_project_id.is_some()
-                        && !self.deleted_only,
-                    egui::Button::new("Add Selected to Project"),
-                )
-                .clicked()
-            {
-                self.add_selected_to_project();
-            }
-            if ui
-                .add_enabled(
-                    self.selected_id.is_some()
-                        && self.selected_project_id.is_some()
-                        && !self.deleted_only,
-                    egui::Button::new("Remove Selected from Project"),
-                )
-                .clicked()
-            {
-                self.request_remove_selected_from_project();
+            ui.separator();
+            ui.label(format!("{} shown", self.assets.len()));
+            if self.deleted_only {
+                ui.label(egui::RichText::new("RECYCLE BIN").strong());
             }
         });
+
+        if self.settings.show_filters {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Category");
+                    ui.add(egui::TextEdit::singleline(&mut self.category_filter).desired_width(120.0));
+                    ui.label("Tag");
+                    ui.add(egui::TextEdit::singleline(&mut self.tag_filter).desired_width(120.0));
+                    ui.label("Type");
+                    ui.add(egui::TextEdit::singleline(&mut self.extension_filter).desired_width(80.0));
+                    ui.label("License");
+                    egui::ComboBox::from_id_salt("phase16_license_filter")
+                        .selected_text(&self.license_filter)
+                        .show_ui(ui, |ui| {
+                            for value in ["All", "Complete", "Warning", "Unknown", "Custom"] {
+                                ui.selectable_value(&mut self.license_filter, value.to_string(), value);
+                            }
+                        });
+                    if ui.button("Apply").clicked() {
+                        self.refresh_assets();
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.category_filter.clear();
+                        self.tag_filter.clear();
+                        self.extension_filter.clear();
+                        self.license_filter = "All".to_string();
+                        self.refresh_assets();
+                    }
+                });
+            });
+        }
     }
 
     fn asset_grid(&mut self, ui: &mut egui::Ui) {
+        let card_width = self.settings.card_width.clamp(170.0, 300.0);
+        let columns = ((ui.available_width() + 12.0) / (card_width + 12.0))
+            .floor()
+            .max(1.0) as usize;
+        let preview_height = card_width * 0.58;
         let mut chosen: Option<String> = None;
+
         egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("dragonforge_asset_grid")
-                .num_columns(4)
+            egui::Grid::new("phase16_asset_grid")
+                .num_columns(columns)
                 .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     for (index, asset) in self.assets.iter().enumerate() {
-                        ui.vertical(|ui| {
+                        let selected = self.selected_id.as_deref() == Some(asset.id.as_str());
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(card_width);
                             if let Some(texture) = self.thumbnails.get(&asset.id) {
-                                ui.image((texture.id(), egui::vec2(210.0, 120.0)));
+                                ui.image((texture.id(), egui::vec2(card_width - 16.0, preview_height)));
                             } else {
                                 let placeholder = match asset.extension.as_deref() {
-                                    Some("fbx") | Some("obj") | Some("glb") | Some("gltf")
-                                    | Some("blend") => "3D MODEL",
+                                    Some("fbx") | Some("obj") | Some("glb") | Some("gltf") | Some("blend") => "3D MODEL",
                                     Some("wav") | Some("mp3") | Some("ogg") => "AUDIO",
                                     Some("zip") | Some("7z") => "ARCHIVE",
                                     _ => "ASSET",
                                 };
                                 ui.add_sized(
-                                    [210.0, 120.0],
-                                    egui::Label::new(placeholder).selectable(false),
+                                    [card_width - 16.0, preview_height],
+                                    egui::Label::new(egui::RichText::new(placeholder).strong()).selectable(false),
                                 );
                             }
 
-                            let ext = asset
-                                .extension
-                                .as_deref()
-                                .unwrap_or("file")
-                                .to_ascii_uppercase();
-                            let category = asset.category.as_deref().unwrap_or("Uncategorized");
-                            let marker = if self.selected_id.as_deref() == Some(asset.id.as_str()) {
-                                "● "
+                            let name = if selected {
+                                egui::RichText::new(&asset.name).strong()
                             } else {
-                                ""
+                                egui::RichText::new(&asset.name)
                             };
-                            let deleted = if asset.deleted_at.is_some() {
-                                "\n[RECYCLE BIN]"
-                            } else {
-                                ""
-                            };
-                            let license_status = license_status_label(asset);
-                            let label = format!(
-                                "{marker}{}\n{} · {}\n{}\nLicense: {}\n{}{}",
-                                asset.name,
-                                ext,
-                                human_size(asset.byte_size),
-                                category,
-                                license_status,
-                                if asset.tags.is_empty() {
-                                    "No tags".to_string()
-                                } else {
-                                    asset.tags.join(", ")
-                                },
-                                deleted
-                            );
-
                             if ui
-                                .add_sized([210.0, 92.0], egui::Button::new(label).wrap())
+                                .add_sized([card_width - 16.0, 32.0], egui::Button::new(name).selected(selected))
                                 .clicked()
                             {
                                 chosen = Some(asset.id.clone());
                             }
+
+                            let ext = asset.extension.as_deref().unwrap_or("file").to_ascii_uppercase();
+                            ui.small(format!("{}  ·  {}  ·  v{}", ext, human_size(asset.byte_size), asset.current_version));
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.small(asset.category.as_deref().unwrap_or("Uncategorized"));
+                                if let Some(Some(checkout)) = self.checkout_status.get(&asset.id) {
+                                    ui.small(format!("● {}", checkout.holder));
+                                }
+                                if self.storage_tiers.get(&asset.id).is_some_and(|status| status.tier == "archive") {
+                                    ui.small("ARCHIVED");
+                                }
+                                let license = license_status_label(asset);
+                                if license != "Complete" {
+                                    ui.small(format!("⚠ {license}"));
+                                }
+                            });
                         });
 
-                        if (index + 1) % 4 == 0 {
+                        if (index + 1) % columns == 0 {
                             ui.end_row();
                         }
                     }
@@ -2939,216 +2922,176 @@ impl DragonForgeClient {
 
     fn details_panel(&mut self, ui: &mut egui::Ui) {
         let can_write = self.can_write();
-        ui.heading(if self.deleted_only {
-            "Recycle Bin Details"
-        } else {
-            "Asset Details"
-        });
-        ui.separator();
-
         let Some(asset) = self.selected_asset().cloned() else {
-            ui.label("Select an asset from the library.");
+            ui.heading("Inspector");
+            ui.add_space(12.0);
+            ui.label("Select an asset to inspect its metadata, versions, collaboration state, projects, and storage.");
             return;
         };
 
         if let Some(texture) = self.thumbnails.get(&asset.id) {
-            let available = ui.available_width().min(300.0);
-            ui.image((texture.id(), egui::vec2(available, available * 0.7)));
-            ui.separator();
+            let width = ui.available_width().min(360.0);
+            ui.image((texture.id(), egui::vec2(width, width * 0.62)));
         }
-
         ui.heading(&asset.name);
-        ui.label(format!("File: {}", asset.original_filename));
-        ui.label(format!("Size: {}", human_size(asset.byte_size)));
-        ui.label(format!("Type: {}", asset.extension.as_deref().unwrap_or("unknown")));
-        ui.label(format!(
-            "Category: {}",
-            asset.category.as_deref().unwrap_or("Uncategorized")
-        ));
-        ui.label(format!("Added: {}", asset.created_at));
-        ui.label(format!("Updated: {}", asset.updated_at));
-        ui.label(format!("Current Version: v{}", asset.current_version));
-        if let Some(deleted_at) = &asset.deleted_at {
-            ui.label(format!("Deleted: {deleted_at}"));
-        }
+        ui.small(&asset.original_filename);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("v{}", asset.current_version));
+            ui.label(asset.extension.as_deref().unwrap_or("file").to_ascii_uppercase());
+            ui.label(human_size(asset.byte_size));
+            if asset.deleted_at.is_some() {
+                ui.label(egui::RichText::new("RECYCLE BIN").strong());
+            }
+            if self.storage_tiers.get(&asset.id).is_some_and(|status| status.tier == "archive") {
+                ui.label(egui::RichText::new("ARCHIVED").strong());
+            } else {
+                ui.label("HOT");
+            }
+        });
         ui.separator();
 
-        if let Some(description) = &asset.description {
-            ui.label(description);
-            ui.separator();
-        }
+        egui::CollapsingHeader::new("General")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(format!("Category: {}", asset.category.as_deref().unwrap_or("Uncategorized")));
+                ui.label(format!("Creator: {}", asset.creator.as_deref().unwrap_or("Unknown")));
+                ui.label(format!("License: {}", asset.license.as_deref().unwrap_or("Not recorded")));
+                ui.label(format!("License status: {}", license_status_label(&asset)));
+                if let Some(description) = &asset.description {
+                    ui.add_space(4.0);
+                    ui.label(description);
+                }
+                if !asset.tags.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for tag in &asset.tags {
+                            ui.small(format!("#{tag}"));
+                        }
+                    });
+                }
+                for warning in license_warnings(&asset) {
+                    ui.label(format!("⚠ {warning}"));
+                }
+            });
 
-        ui.label(format!(
-            "Tags: {}",
-            if asset.tags.is_empty() {
-                "None".to_string()
-            } else {
-                asset.tags.join(", ")
-            }
-        ));
-        ui.label(format!("Creator: {}", asset.creator.as_deref().unwrap_or("Unknown")));
-        ui.label(format!(
-            "License: {}",
-            asset.license.as_deref().unwrap_or("Not recorded")
-        ));
-        ui.label(format!(
-            "Attribution: {}",
-            if asset.attribution_required {
-                "Required"
-            } else {
-                "Not marked as required"
-            }
-        ));
-        let license_status = license_status_label(&asset);
-        ui.label(format!("License Status: {license_status}"));
-        for warning in license_warnings(&asset) {
-            ui.label(format!("⚠ {warning}"));
-        }
-        if let Some(source) = &asset.source_url {
-            ui.label(format!("Source: {source}"));
-        }
-
-        ui.separator();
-        let (identity_user, identity_workstation) = self.checkout_identity();
-        match self.checkout_status.get(&asset.id) {
-            Some(Some(checkout)) => {
-                ui.label(format!(
-                    "Checked out by: {}@{}",
-                    checkout.holder, checkout.workstation
-                ));
-                ui.small(format!("Since: {}", checkout.checked_out_at));
-                if let Some(note) = checkout.note.as_deref() {
-                    if !note.trim().is_empty() {
-                        ui.label(format!("Checkout note: {note}"));
+        egui::CollapsingHeader::new("Collaboration")
+            .default_open(true)
+            .show(ui, |ui| {
+                let (identity_user, identity_workstation) = self.checkout_identity();
+                match self.checkout_status.get(&asset.id) {
+                    Some(Some(checkout)) => {
+                        ui.label(format!("● Checked out by {}@{}", checkout.holder, checkout.workstation));
+                        ui.small(format!("Since {}", checkout.checked_out_at));
+                        if let Some(note) = checkout.note.as_deref().filter(|n| !n.trim().is_empty()) {
+                            ui.label(note);
+                        }
+                        let mine = checkout.holder == identity_user && checkout.workstation == identity_workstation;
+                        if ui
+                            .add_enabled(mine && can_write && self.busy_count == 0, egui::Button::new("Check In"))
+                            .clicked()
+                        {
+                            self.checkin_selected();
+                        }
+                    }
+                    Some(None) => {
+                        ui.add(egui::TextEdit::singleline(&mut self.checkout_note).hint_text("Optional checkout note"));
+                        if ui
+                            .add_enabled(can_write && self.busy_count == 0 && asset.deleted_at.is_none(), egui::Button::new("Check Out"))
+                            .clicked()
+                        {
+                            self.checkout_selected();
+                        }
+                    }
+                    None => {
+                        if ui.button("Load checkout status").clicked() {
+                            self.refresh_checkout(asset.id.clone());
+                        }
                     }
                 }
-                if checkout.holder == identity_user && checkout.workstation == identity_workstation {
-                    if ui
-                        .add_enabled(self.busy_count == 0 && can_write, egui::Button::new("Check In"))
-                        .clicked()
-                    {
-                        self.checkin_selected();
+            });
+
+        egui::CollapsingHeader::new("Versions & Package")
+            .default_open(false)
+            .show(ui, |ui| {
+                if ui.button("Version History").clicked() {
+                    self.open_versions_selected();
+                }
+                if ui.button("Package / Dependencies").clicked() {
+                    self.open_package_contents();
+                }
+                if ui.button("Asset Activity").clicked() {
+                    self.open_asset_activity(&asset.id);
+                }
+            });
+
+        egui::CollapsingHeader::new("Project")
+            .default_open(false)
+            .show(ui, |ui| {
+                let project_name = self.selected_project()
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| "No project selected".to_string());
+                ui.label(project_name);
+                if ui
+                    .add_enabled(can_write && self.selected_project_id.is_some() && asset.deleted_at.is_none(), egui::Button::new("Add to Project"))
+                    .clicked()
+                {
+                    self.add_selected_to_project();
+                }
+                if ui
+                    .add_enabled(can_write && self.selected_project_id.is_some(), egui::Button::new("Remove from Project"))
+                    .clicked()
+                {
+                    self.request_remove_selected_from_project();
+                }
+            });
+
+        egui::CollapsingHeader::new("Storage")
+            .default_open(false)
+            .show(ui, |ui| {
+                match self.storage_tiers.get(&asset.id).cloned() {
+                    Some(status) => {
+                        ui.label(format!("Tier: {} · {} object(s)", status.tier.to_ascii_uppercase(), status.object_count));
+                        if status.archive_enabled {
+                            if status.tier == "archive" {
+                                if ui.add_enabled(can_write && self.busy_count == 0, egui::Button::new("Recall to Hot Storage")).clicked() {
+                                    self.recall_selected();
+                                }
+                            } else if ui.add_enabled(can_write && self.busy_count == 0 && asset.deleted_at.is_none(), egui::Button::new("Archive Asset")).clicked() {
+                                self.archive_selected();
+                            }
+                        } else {
+                            ui.small("Archive storage is not configured.");
+                        }
+                    }
+                    None => {
+                        if ui.button("Load storage status").clicked() {
+                            self.refresh_storage_tier(asset.id.clone());
+                        }
+                    }
+                }
+                ui.small(format!("SHA-256 {}", asset.sha256));
+            });
+
+        egui::CollapsingHeader::new("Actions")
+            .default_open(true)
+            .show(ui, |ui| {
+                if asset.deleted_at.is_some() {
+                    if ui.add_enabled(can_write, egui::Button::new("Restore Asset")).clicked() {
+                        self.restore_selected();
                     }
                 } else {
-                    ui.label("LOCKED: mutating operations are blocked from this workstation.");
-                }
-            }
-            Some(None) => {
-                ui.horizontal(|ui| {
-                    ui.label("Checkout note:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.checkout_note)
-                            .desired_width(180.0)
-                            .hint_text("optional")
-                    );
-                });
-                if ui
-                    .add_enabled(
-                        self.busy_count == 0 && can_write && asset.deleted_at.is_none(),
-                        egui::Button::new("Check Out"),
-                    )
-                    .clicked()
-                {
-                    self.checkout_selected();
-                }
-            }
-            None => {
-                ui.label("Checkout status: not loaded");
-                if ui.button("Load Checkout Status").clicked() {
-                    self.refresh_checkout(asset.id.clone());
-                }
-            }
-        }
-
-        ui.separator();
-        match self.storage_tiers.get(&asset.id).cloned() {
-            Some(storage_status) => {
-                ui.label(format!(
-                    "Storage Tier: {} · {} object{}",
-                    storage_status.tier.to_ascii_uppercase(),
-                    storage_status.object_count,
-                    if storage_status.object_count == 1 { "" } else { "s" }
-                ));
-                if let Some(at) = storage_status.transitioned_at.as_deref() {
-                    ui.small(format!("Last tier transition: {at}"));
-                }
-                if !storage_status.archive_enabled {
-                    ui.label("Archive tier is not configured on the server.");
-                } else if storage_status.tier == "archive" {
-                    if ui
-                        .add_enabled(self.busy_count == 0 && can_write, egui::Button::new("Recall to Hot Storage"))
-                        .clicked()
-                    {
-                        self.recall_selected();
+                    if ui.button("Download").clicked() {
+                        self.download_selected();
                     }
-                } else if ui
-                    .add_enabled(
-                        self.busy_count == 0 && can_write && asset.deleted_at.is_none(),
-                        egui::Button::new("Archive Asset"),
-                    )
-                    .clicked()
-                {
-                    self.archive_selected();
+                    if ui.add_enabled(can_write, egui::Button::new("Edit Metadata")).clicked() {
+                        self.begin_edit_selected();
+                    }
+                    if ui.add_enabled(can_write, egui::Button::new("Move to Recycle Bin")).clicked() {
+                        self.delete_selected();
+                    }
                 }
-                if ui.button("Refresh Storage Status").clicked() {
-                    self.refresh_storage_tier(asset.id.clone());
-                }
-            }
-            None => {
-                ui.label("Storage Tier: status not loaded");
-                if ui.button("Load Storage Status").clicked() {
-                    self.refresh_storage_tier(asset.id.clone());
-                }
-            }
-        }
-
-        ui.separator();
-        ui.label("SHA-256");
-        ui.small(&asset.sha256);
-        ui.add_space(8.0);
-
-        if asset.deleted_at.is_some() {
-            if ui.add_enabled(can_write, egui::Button::new("Restore Asset")).clicked() {
-                self.restore_selected();
-            }
-        } else {
-            if ui.button("Download Asset").clicked() {
-                self.download_selected();
-            }
-            if ui.add_enabled(can_write, egui::Button::new("Edit Metadata")).clicked() {
-                self.begin_edit_selected();
-            }
-            if ui.button("Version History").clicked() {
-                self.open_versions_selected();
-            }
-            if ui.button("Asset Activity").clicked() {
-                self.open_asset_activity(&asset.id);
-            }
-            if ui.button("Package / Dependencies").clicked() {
-                self.open_package_contents();
-            }
-            if ui.add_enabled(can_write, egui::Button::new("Move to Recycle Bin")).clicked() {
-                self.delete_selected();
-            }
-            if ui
-                .add_enabled(
-                    can_write && self.selected_project_id.is_some(),
-                    egui::Button::new("Add to Selected Project"),
-                )
-                .clicked()
-            {
-                self.add_selected_to_project();
-            }
-            if ui
-                .add_enabled(
-                    can_write && self.selected_project_id.is_some(),
-                    egui::Button::new("Remove from Selected Project"),
-                )
-                .clicked()
-            {
-                self.request_remove_selected_from_project();
-            }
-        }
+            });
     }
 
     fn upload_window(&mut self, ctx: &egui::Context) {
@@ -3416,6 +3359,303 @@ impl DragonForgeClient {
                     }
                 });
             });
+    }
+
+    fn projects_page(&mut self, ui: &mut egui::Ui) {
+        let can_write = self.can_write();
+        ui.horizontal(|ui| {
+            ui.heading("Projects");
+            if ui.add_enabled(can_write, egui::Button::new("+ New Project")).clicked() {
+                self.show_project_create = true;
+            }
+            if ui.button("Refresh").clicked() {
+                self.refresh_projects();
+            }
+        });
+        ui.label("Engine-aware project exports, license manifests, and sync health.");
+        ui.separator();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for project in self.projects.clone() {
+                let selected = self.selected_project_id.as_deref() == Some(project.id.as_str());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, &project.name).clicked() {
+                            self.selected_project_id = Some(project.id.clone());
+                        }
+                        ui.label(format!("{} · {}", project.engine, project.local_path));
+                    });
+                    if let Some(description) = project.description.as_deref().filter(|v| !v.is_empty()) {
+                        ui.small(description);
+                    }
+                    if selected {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Check Sync").clicked() {
+                                self.check_selected_project_sync();
+                            }
+                            if ui.add_enabled(can_write, egui::Button::new("Repair Pinned")).clicked() {
+                                self.repair_selected_project_sync();
+                            }
+                            if ui.add_enabled(can_write, egui::Button::new("Update to Latest")).clicked() {
+                                self.update_selected_project_to_latest();
+                            }
+                            if ui.button("Refresh Credits").clicked() {
+                                self.refresh_project_license_files();
+                            }
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+    }
+
+    fn activity_page(&mut self, ui: &mut egui::Ui) {
+        let is_admin = self.is_admin();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("User");
+            ui.add(egui::TextEdit::singleline(&mut self.audit_username).desired_width(110.0));
+            ui.label("Action");
+            ui.add(egui::TextEdit::singleline(&mut self.audit_action).desired_width(140.0));
+            ui.label("Result");
+            egui::ComboBox::from_id_salt("phase16_audit_result")
+                .selected_text(if self.audit_result.is_empty() { "All" } else { &self.audit_result })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.audit_result, String::new(), "All");
+                    ui.selectable_value(&mut self.audit_result, "success".to_string(), "Success");
+                    ui.selectable_value(&mut self.audit_result, "failure".to_string(), "Failure");
+                });
+            if ui.button("Apply").clicked() {
+                self.refresh_activity();
+            }
+            if is_admin && ui.button("Export JSON + CSV").clicked() {
+                self.export_activity();
+            }
+            if ui.button("Clear").clicked() {
+                self.audit_username.clear();
+                self.audit_action.clear();
+                self.audit_result.clear();
+                self.audit_target_type.clear();
+                self.audit_target_id.clear();
+                self.audit_from.clear();
+                self.audit_to.clear();
+                self.refresh_activity();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Target");
+            ui.add(egui::TextEdit::singleline(&mut self.audit_target_type).desired_width(90.0).hint_text("asset"));
+            ui.add(egui::TextEdit::singleline(&mut self.audit_target_id).desired_width(190.0).hint_text("target id"));
+            ui.label("From");
+            ui.add(egui::TextEdit::singleline(&mut self.audit_from).desired_width(170.0).hint_text("RFC3339"));
+            ui.label("To");
+            ui.add(egui::TextEdit::singleline(&mut self.audit_to).desired_width(170.0).hint_text("RFC3339"));
+        });
+        ui.separator();
+        ui.label(format!("{} events", self.audit_events.len()));
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for event in &self.audit_events {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(&event.action);
+                        ui.label(format!("{} · HTTP {}", event.result.to_ascii_uppercase(), event.status_code));
+                        ui.label(&event.occurred_at);
+                    });
+                    ui.small(format!(
+                        "{} ({}) @ {}",
+                        event.actor_username.as_deref().unwrap_or("anonymous"),
+                        event.actor_role.as_deref().unwrap_or("unknown"),
+                        event.workstation.as_deref().unwrap_or("unknown")
+                    ));
+                    ui.small(format!("{} {}", event.method, event.path));
+                    if let Some(kind) = event.target_type.as_deref() {
+                        ui.small(format!("Target: {} {}", kind, event.target_id.as_deref().unwrap_or("")));
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        });
+    }
+
+    fn backups_page(&mut self, ui: &mut egui::Ui) {
+        let is_admin = self.is_admin();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(is_admin && self.busy_count == 0, egui::Button::new("Create Backup")).clicked() {
+                self.create_vault_backup();
+            }
+            if ui.add_enabled(
+                is_admin && self.busy_count == 0 && self.backup_status.as_ref().is_some_and(|s| !s.backups.is_empty()),
+                egui::Button::new("Verify Latest"),
+            ).clicked() {
+                self.verify_latest_backup();
+            }
+            if ui.button("Refresh").clicked() {
+                self.refresh_backup_status();
+            }
+        });
+        ui.separator();
+        match self.backup_status.clone() {
+            Some(status) => {
+                ui.label(format!("Backup directory: {}", status.backup_directory));
+                ui.label(format!("Retention: {} snapshots", status.keep));
+                if !status.replication_targets.is_empty() {
+                    ui.label(format!("Replication: {}", status.replication_targets.join(", ")));
+                }
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for backup in status.backups {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.strong(&backup.backup_id);
+                                ui.label(human_size(backup.total_bytes as i64));
+                                ui.label(format!("{} files", backup.files));
+                                ui.label(if backup.verified { "VERIFIED" } else { "NOT VERIFIED" });
+                            });
+                            ui.small(backup.created_at);
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+            }
+            None => {
+                ui.label("Backup status has not been loaded.");
+            }
+        }
+    }
+
+    fn ai_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Local AI Search");
+        ui.label("Semantic search runs locally through Ollama and falls back to keyword search when unavailable.");
+        ui.separator();
+        if let Some(status) = self.semantic_status.clone() {
+            ui.label(format!("Enabled: {}", status.enabled));
+            ui.label(format!("Ollama reachable: {}", status.ollama_reachable));
+            ui.label(format!("Model: {}", status.model));
+            ui.label(format!("Indexed: {} / {}", status.indexed_assets, status.total_active_assets));
+            ui.label(format!("Stale: {}", status.stale_assets));
+            if let Some(error) = status.last_error {
+                ui.label(format!("Last error: {error}"));
+            }
+        } else {
+            ui.label("AI status has not been loaded.");
+        }
+        ui.add_space(8.0);
+        if ui.add_enabled(self.can_write(), egui::Button::new("Reindex AI Search")).clicked() {
+            self.reindex_semantic_search();
+        }
+        if ui.button("Refresh AI Status").clicked() {
+            self.refresh_semantic_status();
+        }
+    }
+
+    fn users_page(&mut self, ui: &mut egui::Ui) {
+        if !self.is_admin() {
+            ui.label("Administrator role is required.");
+            return;
+        }
+
+        ui.heading("User Management");
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Username");
+                ui.add(egui::TextEdit::singleline(&mut self.new_user_name).desired_width(140.0));
+                egui::ComboBox::from_id_salt("phase16_new_user_role")
+                    .selected_text(self.new_user_role.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.new_user_role, UserRole::Administrator, "Administrator");
+                        ui.selectable_value(&mut self.new_user_role, UserRole::Developer, "Developer");
+                        ui.selectable_value(&mut self.new_user_role, UserRole::ReadOnly, "Read-only");
+                    });
+                ui.label("Token");
+                ui.add(egui::TextEdit::singleline(&mut self.new_user_token).password(true).desired_width(220.0));
+                if ui.add_enabled(self.busy_count == 0, egui::Button::new("Create User")).clicked() {
+                    self.create_vault_user();
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for user in self.users.clone() {
+                let selected = self.selected_user_id.as_deref() == Some(user.id.as_str());
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    if ui.selectable_label(
+                        selected,
+                        format!("{} · {} · {}", user.username, user.role, if user.enabled { "enabled" } else { "disabled" }),
+                    ).clicked() {
+                        self.selected_user_id = Some(user.id.clone());
+                        self.selected_user_enabled = user.enabled;
+                        self.selected_user_role = match user.role.as_str() {
+                            "administrator" => UserRole::Administrator,
+                            "read_only" => UserRole::ReadOnly,
+                            _ => UserRole::Developer,
+                        };
+                        self.selected_user_token.clear();
+                    }
+                    if selected {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(&mut self.selected_user_enabled, "Enabled");
+                            egui::ComboBox::from_id_salt(format!("phase16_role_{}", user.id))
+                                .selected_text(self.selected_user_role.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.selected_user_role, UserRole::Administrator, "Administrator");
+                                    ui.selectable_value(&mut self.selected_user_role, UserRole::Developer, "Developer");
+                                    ui.selectable_value(&mut self.selected_user_role, UserRole::ReadOnly, "Read-only");
+                                });
+                            ui.add(egui::TextEdit::singleline(&mut self.selected_user_token).password(true).hint_text("New token (optional)").desired_width(190.0));
+                            if ui.button("Save").clicked() {
+                                self.save_selected_user();
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.delete_selected_user();
+                            }
+                        });
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        });
+    }
+
+    fn settings_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Connection");
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label("Server URL");
+            ui.add(egui::TextEdit::singleline(&mut self.settings.server_url).desired_width(420.0));
+            ui.label("API Token");
+            ui.add(egui::TextEdit::singleline(&mut self.settings.api_token).password(true).desired_width(420.0));
+            if ui.button("Save & Connect").clicked() {
+                let _ = save_settings(&self.settings);
+                self.check_server();
+                self.refresh_auth_me();
+                self.refresh_assets();
+                self.refresh_projects();
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.heading("Appearance");
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            let mut changed = false;
+            changed |= ui.checkbox(&mut self.settings.dark_mode, "Dark mode").changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.85..=1.5).text("UI scale")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.card_width, 170.0..=300.0).text("Asset card width")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.sidebar_width, 170.0..=280.0).text("Sidebar width")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.inspector_width, 280.0..=480.0).text("Inspector width")).changed();
+            if changed {
+                let _ = save_settings(&self.settings);
+                self.apply_phase16_style(ctx);
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.heading("Client");
+        let (_, workstation) = Self::workstation_identity();
+        ui.label(format!("Workstation: {workstation}"));
+        ui.label(format!("Logs: {}", client_log_dir().display()));
+        if let Some(health) = &self.health {
+            ui.label(format!("Server phase {} · v{}", health.phase, health.version));
+        }
     }
 
     fn activity_window(&mut self, ctx: &egui::Context) {
@@ -3745,48 +3985,71 @@ impl DragonForgeClient {
 
 impl eframe::App for DragonForgeClient {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_phase16_style(ctx);
         self.handle_events(ctx);
         self.process_dropped_files(ctx);
 
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        egui::SidePanel::left("phase16_sidebar")
+            .default_width(self.settings.sidebar_width)
+            .resizable(true)
+            .show(ctx, |ui| self.sidebar(ui));
+
+        egui::TopBottomPanel::top("phase16_header").show(ctx, |ui| {
+            ui.add_space(4.0);
             self.top_bar(ui);
-            ui.separator();
-            self.filter_bar(ui);
+            if self.current_view == AppView::Library {
+                ui.separator();
+                self.filter_bar(ui);
+            }
+            ui.add_space(4.0);
         });
 
-        egui::SidePanel::right("details")
-            .default_width(350.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("asset_details_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.details_panel(ui));
-            });
+        if self.current_view == AppView::Library {
+            egui::SidePanel::right("phase16_inspector")
+                .default_width(self.settings.inspector_width)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("phase16_inspector_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.details_panel(ui));
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.assets.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(if self.deleted_only {
-                        "Recycle bin is empty."
+            match self.current_view {
+                AppView::Library => {
+                    if self.assets.is_empty() {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(if self.deleted_only {
+                                "Recycle bin is empty."
+                            } else {
+                                "No matching assets. Add an asset or change the filters."
+                            });
+                        });
                     } else {
-                        "No matching assets. Add an asset or change the filters."
-                    });
-                });
-            } else {
-                self.asset_grid(ui);
+                        self.asset_grid(ui);
+                    }
+                }
+                AppView::Projects => self.projects_page(ui),
+                AppView::Activity => self.activity_page(ui),
+                AppView::Backups => self.backups_page(ui),
+                AppView::AiSearch => self.ai_page(ui),
+                AppView::Users => self.users_page(ui),
+                AppView::Settings => self.settings_page(ui, ctx),
             }
         });
 
-        egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("phase16_status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(format!("{} assets shown", self.assets.len()));
+                ui.small(&self.status);
                 ui.separator();
-                ui.label(format!("{} projects", self.projects.len()));
+                ui.small(format!("{} assets", self.assets.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 15");
-                ui.separator();
-                ui.label(format!("Logs: {}", client_log_dir().display()));
+                ui.small(format!("{} projects", self.projects.len()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small("DragonForge · Phase 16");
+                });
             });
         });
 
@@ -3797,8 +4060,6 @@ impl eframe::App for DragonForgeClient {
         self.package_import_window(ctx);
         self.package_contents_window(ctx);
         self.remove_project_confirm_window(ctx);
-        self.activity_window(ctx);
-        self.user_management_window(ctx);
         self.project_sync_window(ctx);
     }
 }
@@ -4206,6 +4467,13 @@ fn is_previewable_extension(extension: Option<&str>) -> bool {
     )
 }
 
+fn default_ui_scale() -> f32 { 1.0 }
+fn default_card_width() -> f32 { 220.0 }
+fn default_sidebar_width() -> f32 { 205.0 }
+fn default_inspector_width() -> f32 { 360.0 }
+fn default_last_view() -> String { "library".to_string() }
+fn default_true() -> bool { true }
+
 fn settings_path() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
         return PathBuf::from(appdata)
@@ -4260,7 +4528,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 15,
+        phase = 16,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
@@ -4268,8 +4536,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DragonForge Asset Vault")
-            .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([980.0, 640.0])
+            .with_inner_size([1500.0, 920.0])
+            .with_min_inner_size([1080.0, 680.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
