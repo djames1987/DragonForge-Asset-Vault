@@ -27,6 +27,44 @@ struct HealthResponse {
     service: String,
     phase: u8,
     version: String,
+    auth_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum UserRole {
+    Administrator,
+    Developer,
+    ReadOnly,
+}
+
+impl UserRole {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Administrator => "Administrator",
+            Self::Developer => "Developer",
+            Self::ReadOnly => "Read-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultUser {
+    id: String,
+    username: String,
+    role: String,
+    enabled: bool,
+    created_at: String,
+    updated_at: String,
+    last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuthMeResponse {
+    enabled: bool,
+    authenticated: bool,
+    username: Option<String>,
+    role: Option<UserRole>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,12 +308,15 @@ struct ProjectLicenseReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
     server_url: String,
+    #[serde(default)]
+    api_token: String,
 }
 
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
             server_url: "http://127.0.0.1:8080".to_string(),
+            api_token: String::new(),
         }
     }
 }
@@ -341,6 +382,11 @@ impl Default for ProjectForm {
 
 enum ClientEvent {
     Health(Result<HealthResponse, String>),
+    AuthMe(Result<AuthMeResponse, String>),
+    Users(Result<Vec<VaultUser>, String>),
+    UserCreated(Result<VaultUser, String>),
+    UserUpdated(Result<VaultUser, String>),
+    UserDeleted(Result<String, String>),
     SemanticStatus(Result<SemanticStatusResponse, String>),
     SemanticReindex(Result<ReindexResponse, String>),
     BackupStatus(Result<BackupStatusResponse, String>),
@@ -443,6 +489,16 @@ struct DragonForgeClient {
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
+    auth_me: Option<AuthMeResponse>,
+    users: Vec<VaultUser>,
+    show_users: bool,
+    new_user_name: String,
+    new_user_role: UserRole,
+    new_user_token: String,
+    selected_user_id: Option<String>,
+    selected_user_role: UserRole,
+    selected_user_enabled: bool,
+    selected_user_token: String,
     upload: UploadForm,
     edit: EditForm,
     project_form: ProjectForm,
@@ -504,6 +560,16 @@ impl DragonForgeClient {
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
+            auth_me: None,
+            users: Vec::new(),
+            show_users: false,
+            new_user_name: String::new(),
+            new_user_role: UserRole::Developer,
+            new_user_token: String::new(),
+            selected_user_id: None,
+            selected_user_role: UserRole::Developer,
+            selected_user_enabled: true,
+            selected_user_token: String::new(),
             upload: UploadForm::default(),
             edit: EditForm::default(),
             project_form: ProjectForm::default(),
@@ -563,6 +629,17 @@ impl DragonForgeClient {
             ReqwestHeaderValue::from_str(&workstation.replace(['\r', '\n'], "_"))
                 .map_err(|e| e.to_string())?,
         );
+        let token = std::env::var("DRAGONFORGE_API_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| load_settings().ok().map(|settings| settings.api_token).filter(|value| !value.trim().is_empty()));
+        if let Some(token) = token {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                ReqwestHeaderValue::from_str(&format!("Bearer {}", token.trim()))
+                    .map_err(|e| e.to_string())?,
+            );
+        }
         Client::builder()
             .connect_timeout(Duration::from_secs(4))
             .default_headers(headers)
@@ -594,6 +671,109 @@ impl DragonForgeClient {
                     .map_err(|e| e.to_string())
             })();
             let _ = tx.send(ClientEvent::Health(result));
+        });
+    }
+
+    fn refresh_auth_me(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<AuthMeResponse, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/auth/me"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::AuthMe(result));
+        });
+    }
+
+    fn refresh_users(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<VaultUser>, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/users"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::Users(result));
+        });
+    }
+
+    fn create_vault_user(&mut self) {
+        let username = self.new_user_name.trim().to_string();
+        let token = self.new_user_token.trim().to_string();
+        if username.is_empty() || token.len() < 16 {
+            self.status = "New user needs a username and an API token of at least 16 characters.".to_string();
+            return;
+        }
+        let role = self.new_user_role.clone();
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        thread::spawn(move || {
+            let result = (|| -> Result<VaultUser, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/users"))
+                    .json(&serde_json::json!({"username": username, "role": role, "token": token}))
+                    .send().map_err(|e| e.to_string())?
+                    .error_for_status().map_err(|e| e.to_string())?
+                    .json().map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::UserCreated(result));
+        });
+    }
+
+    fn save_selected_user(&mut self) {
+        let Some(id) = self.selected_user_id.clone() else { return; };
+        let role = self.selected_user_role.clone();
+        let enabled = self.selected_user_enabled;
+        let token = self.selected_user_token.trim().to_string();
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        thread::spawn(move || {
+            let body = if token.is_empty() {
+                serde_json::json!({"role": role, "enabled": enabled})
+            } else {
+                serde_json::json!({"role": role, "enabled": enabled, "token": token})
+            };
+            let result = (|| -> Result<VaultUser, String> {
+                Self::api_client()?
+                    .patch(format!("{base}/api/users/{id}"))
+                    .json(&body)
+                    .send().map_err(|e| e.to_string())?
+                    .error_for_status().map_err(|e| e.to_string())?
+                    .json().map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::UserUpdated(result));
+        });
+    }
+
+    fn delete_selected_user(&mut self) {
+        let Some(id) = self.selected_user_id.clone() else { return; };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                Self::api_client()?
+                    .delete(format!("{base}/api/users/{id}"))
+                    .send().map_err(|e| e.to_string())?
+                    .error_for_status().map_err(|e| e.to_string())?;
+                Ok(id)
+            })();
+            let _ = tx.send(ClientEvent::UserDeleted(result));
         });
     }
 
@@ -1523,6 +1703,74 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::AuthMe(result) => {
+                    match result {
+                        Ok(me) => {
+                            info!(username = ?me.username, role = ?me.role, "authentication status loaded");
+                            self.auth_me = Some(me);
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "authentication failed");
+                            self.auth_me = None;
+                            self.status = format!("Authentication failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::Users(result) => {
+                    match result {
+                        Ok(users) => {
+                            self.users = users;
+                            if let Some(id) = self.selected_user_id.clone() {
+                                if let Some(user) = self.users.iter().find(|user| user.id == id) {
+                                    self.selected_user_enabled = user.enabled;
+                                    self.selected_user_role = match user.role.as_str() {
+                                        "administrator" => UserRole::Administrator,
+                                        "read_only" => UserRole::ReadOnly,
+                                        _ => UserRole::Developer,
+                                    };
+                                }
+                            }
+                        }
+                        Err(err) => self.status = format!("User list failed: {err}"),
+                    }
+                }
+                ClientEvent::UserCreated(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(user) => {
+                            self.status = format!("Created user {}", user.username);
+                            self.new_user_name.clear();
+                            self.new_user_token.clear();
+                            self.refresh_users();
+                        }
+                        Err(err) => self.status = format!("Create user failed: {err}"),
+                    }
+                }
+                ClientEvent::UserUpdated(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(user) => {
+                            self.status = format!("Updated user {}", user.username);
+                            self.selected_user_token.clear();
+                            self.refresh_users();
+                            self.refresh_auth_me();
+                        }
+                        Err(err) => self.status = format!("Update user failed: {err}"),
+                    }
+                }
+                ClientEvent::UserDeleted(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(id) => {
+                            self.status = "User deleted".to_string();
+                            if self.selected_user_id.as_deref() == Some(id.as_str()) {
+                                self.selected_user_id = None;
+                            }
+                            self.refresh_users();
+                        }
+                        Err(err) => self.status = format!("Delete user failed: {err}"),
+                    }
+                }
                 ClientEvent::SemanticStatus(result) => {
                     match result {
                         Ok(status) => {
@@ -2109,6 +2357,13 @@ impl DragonForgeClient {
             ui.separator();
             ui.label("Server:");
             let response = ui.text_edit_singleline(&mut self.settings.server_url);
+            ui.label("API Token:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.settings.api_token)
+                    .password(true)
+                    .desired_width(140.0)
+                    .hint_text("Phase 13 token")
+            );
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let _ = save_settings(&self.settings);
                 self.check_server();
@@ -2173,8 +2428,27 @@ impl DragonForgeClient {
             };
             ui.label(connection);
             ui.separator();
-            let (identity_user, identity_workstation) = Self::workstation_identity();
-            ui.label(format!("Identity: {}@{}", identity_user, identity_workstation));
+            if let Some(me) = &self.auth_me {
+                let auth_label = if me.enabled {
+                    format!(
+                        "User: {} · {}",
+                        me.username.as_deref().unwrap_or("unknown"),
+                        me.role.as_ref().map(UserRole::label).unwrap_or("unknown")
+                    )
+                } else {
+                    "Auth: disabled (legacy trusted-LAN mode)".to_string()
+                };
+                ui.label(auth_label);
+                if me.role.as_ref().is_some_and(|role| *role == UserRole::Administrator) && me.enabled {
+                    if ui.button("Manage Users").clicked() {
+                        self.show_users = true;
+                        self.refresh_users();
+                    }
+                }
+            }
+            ui.separator();
+            let (_, identity_workstation) = Self::workstation_identity();
+            ui.label(format!("Workstation: {}", identity_workstation));
             ui.separator();
             ui.label(&self.status);
         });
@@ -2933,6 +3207,93 @@ impl DragonForgeClient {
             });
     }
 
+    fn user_management_window(&mut self, ctx: &egui::Context) {
+        if !self.show_users {
+            return;
+        }
+        let mut open = self.show_users;
+        egui::Window::new("DragonForge Users")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(700.0)
+            .show(ctx, |ui| {
+                ui.heading("Create User");
+                ui.horizontal(|ui| {
+                    ui.label("Username");
+                    ui.text_edit_singleline(&mut self.new_user_name);
+                    egui::ComboBox::from_id_salt("new_user_role")
+                        .selected_text(self.new_user_role.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.new_user_role, UserRole::Administrator, "Administrator");
+                            ui.selectable_value(&mut self.new_user_role, UserRole::Developer, "Developer");
+                            ui.selectable_value(&mut self.new_user_role, UserRole::ReadOnly, "Read-only");
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("API Token");
+                    ui.add(egui::TextEdit::singleline(&mut self.new_user_token).password(true).desired_width(300.0));
+                    if ui.add_enabled(self.busy_count == 0, egui::Button::new("Create User")).clicked() {
+                        self.create_vault_user();
+                    }
+                });
+                ui.small("Tokens must be at least 16 characters. DragonForge stores only SHA-256 token hashes on the server.");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.heading("Existing Users");
+                    if ui.button("Refresh").clicked() { self.refresh_users(); }
+                });
+                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    for user in self.users.clone() {
+                        let selected = self.selected_user_id.as_deref() == Some(user.id.as_str());
+                        if ui.selectable_label(
+                            selected,
+                            format!("{} · {} · {}", user.username, user.role, if user.enabled { "enabled" } else { "disabled" })
+                        ).clicked() {
+                            self.selected_user_id = Some(user.id.clone());
+                            self.selected_user_enabled = user.enabled;
+                            self.selected_user_role = match user.role.as_str() {
+                                "administrator" => UserRole::Administrator,
+                                "read_only" => UserRole::ReadOnly,
+                                _ => UserRole::Developer,
+                            };
+                            self.selected_user_token.clear();
+                        }
+                    }
+                });
+                if let Some(id) = self.selected_user_id.clone() {
+                    if let Some(user) = self.users.iter().find(|user| user.id == id).cloned() {
+                        ui.separator();
+                        ui.heading(format!("Edit {}", user.username));
+                        ui.checkbox(&mut self.selected_user_enabled, "Enabled");
+                        egui::ComboBox::from_id_salt("selected_user_role")
+                            .selected_text(self.selected_user_role.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.selected_user_role, UserRole::Administrator, "Administrator");
+                                ui.selectable_value(&mut self.selected_user_role, UserRole::Developer, "Developer");
+                                ui.selectable_value(&mut self.selected_user_role, UserRole::ReadOnly, "Read-only");
+                            });
+                        ui.horizontal(|ui| {
+                            ui.label("New token (optional)");
+                            ui.add(egui::TextEdit::singleline(&mut self.selected_user_token).password(true).desired_width(300.0));
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(self.busy_count == 0, egui::Button::new("Save User")).clicked() {
+                                self.save_selected_user();
+                            }
+                            if ui.add_enabled(self.busy_count == 0, egui::Button::new("Delete User")).clicked() {
+                                self.delete_selected_user();
+                            }
+                        });
+                        if let Some(last) = user.last_used_at {
+                            ui.small(format!("Last API use: {last}"));
+                        }
+                    }
+                }
+            });
+        self.show_users = open;
+    }
+
     fn project_sync_window(&mut self, ctx: &egui::Context) {
         if !self.show_project_sync {
             return;
@@ -3137,6 +3498,7 @@ impl eframe::App for DragonForgeClient {
         self.package_import_window(ctx);
         self.package_contents_window(ctx);
         self.remove_project_confirm_window(ctx);
+        self.user_management_window(ctx);
         self.project_sync_window(ctx);
     }
 }
