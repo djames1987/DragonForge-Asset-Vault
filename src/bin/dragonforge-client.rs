@@ -61,6 +61,40 @@ struct ReindexResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupSummary {
+    backup_id: String,
+    created_at: String,
+    path: String,
+    total_bytes: u64,
+    files: usize,
+    verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupCreateResponse {
+    backup: BackupSummary,
+    replicated_to: Vec<String>,
+    replication_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupVerifyResponse {
+    backup_id: String,
+    valid: bool,
+    checked_files: usize,
+    missing_files: Vec<String>,
+    corrupt_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupStatusResponse {
+    backup_directory: String,
+    replication_targets: Vec<String>,
+    keep: usize,
+    backups: Vec<BackupSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Asset {
     id: String,
     name: String,
@@ -270,6 +304,9 @@ enum ClientEvent {
     Health(Result<HealthResponse, String>),
     SemanticStatus(Result<SemanticStatusResponse, String>),
     SemanticReindex(Result<ReindexResponse, String>),
+    BackupStatus(Result<BackupStatusResponse, String>),
+    BackupCreated(Result<BackupCreateResponse, String>),
+    BackupVerified(Result<BackupVerifyResponse, String>),
     Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
     Upload(Result<UploadResponse, String>),
@@ -337,6 +374,7 @@ struct DragonForgeClient {
     license_filter: String,
     search_mode: String,
     semantic_status: Option<SemanticStatusResponse>,
+    backup_status: Option<BackupStatusResponse>,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -391,6 +429,7 @@ impl DragonForgeClient {
             license_filter: "All".to_string(),
             search_mode: "Smart".to_string(),
             semantic_status: None,
+            backup_status: None,
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -421,6 +460,7 @@ impl DragonForgeClient {
         info!("DragonForge desktop client initialized");
         app.check_server();
         app.refresh_semantic_status();
+        app.refresh_backup_status();
         app.refresh_assets();
         app.refresh_projects();
         app
@@ -496,6 +536,74 @@ impl DragonForgeClient {
                     .map_err(|e| e.to_string())
             })();
             let _ = tx.send(ClientEvent::SemanticReindex(result));
+        });
+    }
+
+    fn refresh_backup_status(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<BackupStatusResponse, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/backups"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::BackupStatus(result));
+        });
+    }
+
+    fn create_vault_backup(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        self.status = "Creating verified vault backup...".to_string();
+        info!("vault backup started");
+        thread::spawn(move || {
+            let result = (|| -> Result<BackupCreateResponse, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/backups"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::BackupCreated(result));
+        });
+    }
+
+    fn verify_latest_backup(&mut self) {
+        let Some(status) = self.backup_status.as_ref() else {
+            self.status = "Load Backup Status first.".to_string();
+            return;
+        };
+        let Some(latest) = status.backups.first() else {
+            self.status = "No backups exist yet.".to_string();
+            return;
+        };
+        let backup_id = latest.backup_id.clone();
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        self.status = format!("Verifying {backup_id}...");
+        thread::spawn(move || {
+            let result = (|| -> Result<BackupVerifyResponse, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/backups/{backup_id}/verify"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::BackupVerified(result));
         });
     }
 
@@ -1150,6 +1258,91 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::BackupStatus(result) => {
+                    match result {
+                        Ok(status) => {
+                            info!(
+                                backup_directory = %status.backup_directory,
+                                backups = status.backups.len(),
+                                replicas = status.replication_targets.len(),
+                                keep = status.keep,
+                                "backup status loaded"
+                            );
+                            self.backup_status = Some(status);
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "backup status unavailable");
+                            self.backup_status = None;
+                        }
+                    }
+                }
+                ClientEvent::BackupCreated(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(
+                                backup_id = %response.backup.backup_id,
+                                path = %response.backup.path,
+                                total_bytes = response.backup.total_bytes,
+                                files = response.backup.files,
+                                replicas = response.replicated_to.len(),
+                                replication_failures = response.replication_failures.len(),
+                                "vault backup completed"
+                            );
+                            self.status = format!(
+                                "Backup {} verified · {} · {} files · {} replicas{}",
+                                response.backup.backup_id,
+                                human_size(response.backup.total_bytes as i64),
+                                response.backup.files,
+                                response.replicated_to.len(),
+                                if response.replication_failures.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {} replication failures", response.replication_failures.len())
+                                }
+                            );
+                            self.refresh_backup_status();
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "vault backup failed");
+                            self.status = format!("Backup failed: {err}");
+                            self.refresh_backup_status();
+                        }
+                    }
+                }
+                ClientEvent::BackupVerified(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(
+                                backup_id = %response.backup_id,
+                                valid = response.valid,
+                                checked_files = response.checked_files,
+                                missing = response.missing_files.len(),
+                                corrupt = response.corrupt_files.len(),
+                                "backup verification completed"
+                            );
+                            self.status = if response.valid {
+                                format!(
+                                    "Backup {} verified successfully · {} files checked",
+                                    response.backup_id, response.checked_files
+                                )
+                            } else {
+                                format!(
+                                    "Backup {} FAILED verification · {} missing · {} corrupt",
+                                    response.backup_id,
+                                    response.missing_files.len(),
+                                    response.corrupt_files.len()
+                                )
+                            };
+                            self.refresh_backup_status();
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "backup verification failed");
+                            self.status = format!("Backup verification failed: {err}");
+                        }
+                    }
+                }
                 ClientEvent::Assets(result) => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
@@ -1443,6 +1636,7 @@ impl DragonForgeClient {
                 let _ = save_settings(&self.settings);
                 self.check_server();
                 self.refresh_semantic_status();
+                self.refresh_backup_status();
                 self.refresh_assets();
                 self.refresh_projects();
             }
@@ -1453,8 +1647,41 @@ impl DragonForgeClient {
                 self.refresh_projects();
             }
             if ui.button("Refresh").clicked() {
+                self.refresh_backup_status();
                 self.refresh_assets();
                 self.refresh_projects();
+            }
+            ui.separator();
+            let backup_label = match &self.backup_status {
+                Some(status) => match status.backups.first() {
+                    Some(latest) => format!(
+                        "Backup: {} · {}",
+                        latest.backup_id,
+                        human_size(latest.total_bytes as i64)
+                    ),
+                    None => "Backup: none".to_string(),
+                },
+                None => "Backup: status unknown".to_string(),
+            };
+            ui.label(backup_label);
+            if ui
+                .add_enabled(self.busy_count == 0, egui::Button::new("Create Backup"))
+                .clicked()
+            {
+                self.create_vault_backup();
+            }
+            if ui
+                .add_enabled(
+                    self.busy_count == 0
+                        && self.backup_status.as_ref().is_some_and(|status| !status.backups.is_empty()),
+                    egui::Button::new("Verify Latest"),
+                )
+                .clicked()
+            {
+                self.verify_latest_backup();
+            }
+            if ui.button("Backup Status").clicked() {
+                self.refresh_backup_status();
             }
             if self.busy_count > 0 {
                 ui.spinner();
@@ -2194,7 +2421,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 9");
+                ui.label("DragonForge Client Phase 10");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -2889,7 +3116,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 9,
+        phase = 10,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
