@@ -1,5 +1,8 @@
 #[path = "../logging.rs"]
 mod logging;
+mod project_sync;
+
+use project_sync::{EnginePreset, ProjectSyncReport};
 
 use eframe::egui;
 use reqwest::blocking::{multipart, Client};
@@ -307,6 +310,10 @@ enum ClientEvent {
     BackupStatus(Result<BackupStatusResponse, String>),
     BackupCreated(Result<BackupCreateResponse, String>),
     BackupVerified(Result<BackupVerifyResponse, String>),
+    EnginePresets(Result<Vec<EnginePreset>, String>),
+    ProjectSyncChecked(Result<ProjectSyncReport, String>),
+    ProjectSyncRepaired(Result<ProjectSyncReport, String>),
+    ProjectSyncUpdated(Result<ProjectSyncReport, String>),
     Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
     Upload(Result<UploadResponse, String>),
@@ -375,6 +382,9 @@ struct DragonForgeClient {
     search_mode: String,
     semantic_status: Option<SemanticStatusResponse>,
     backup_status: Option<BackupStatusResponse>,
+    engine_presets: Vec<EnginePreset>,
+    project_sync_report: Option<ProjectSyncReport>,
+    show_project_sync: bool,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -430,6 +440,9 @@ impl DragonForgeClient {
             search_mode: "Smart".to_string(),
             semantic_status: None,
             backup_status: None,
+            engine_presets: Vec::new(),
+            project_sync_report: None,
+            show_project_sync: false,
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -461,6 +474,7 @@ impl DragonForgeClient {
         app.check_server();
         app.refresh_semantic_status();
         app.refresh_backup_status();
+        app.refresh_engine_presets();
         app.refresh_assets();
         app.refresh_projects();
         app
@@ -604,6 +618,63 @@ impl DragonForgeClient {
                     .map_err(|e| e.to_string())
             })();
             let _ = tx.send(ClientEvent::BackupVerified(result));
+        });
+    }
+
+    fn refresh_engine_presets(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = project_sync::fetch_engine_presets(&base);
+            let _ = tx.send(ClientEvent::EnginePresets(result));
+        });
+    }
+
+    fn check_selected_project_sync(&mut self) {
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let presets = self.engine_presets.clone();
+        self.busy_count += 1;
+        self.status = format!("Checking project sync for {}...", project.name);
+        thread::spawn(move || {
+            let result = project_sync::check_project(&base, &project, &presets);
+            let _ = tx.send(ClientEvent::ProjectSyncChecked(result));
+        });
+    }
+
+    fn repair_selected_project_sync(&mut self) {
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let presets = self.engine_presets.clone();
+        self.busy_count += 1;
+        self.status = format!("Repairing pinned project files for {}...", project.name);
+        thread::spawn(move || {
+            let result = project_sync::repair_project(&base, &project, &presets);
+            let _ = tx.send(ClientEvent::ProjectSyncRepaired(result));
+        });
+    }
+
+    fn update_selected_project_to_latest(&mut self) {
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let presets = self.engine_presets.clone();
+        self.busy_count += 1;
+        self.status = format!("Updating {} to latest vault revisions...", project.name);
+        thread::spawn(move || {
+            let result = project_sync::update_project_to_latest(&base, &project, &presets);
+            let _ = tx.send(ClientEvent::ProjectSyncUpdated(result));
         });
     }
 
@@ -1070,7 +1141,7 @@ impl DragonForgeClient {
         thread::spawn(move || {
             let asset_id = asset.id.clone();
             let project_id = project.id.clone();
-            let result = add_asset_to_project(&base, &project, &asset);
+            let result = project_sync::add_current_asset(&base, &project, &asset);
             let _ = tx.send(ClientEvent::ProjectAssetAdded {
                 project_id,
                 asset_id,
@@ -1113,7 +1184,7 @@ impl DragonForgeClient {
         info!(asset_id = %asset_id, project_id = %project_id, "remove from project started");
 
         thread::spawn(move || {
-            let result = remove_asset_from_project(&base, &project, &asset);
+            let result = project_sync::remove_asset(&base, &project, &asset);
             let _ = tx.send(ClientEvent::ProjectAssetRemoved {
                 project_id,
                 asset_id,
@@ -1340,6 +1411,96 @@ impl DragonForgeClient {
                         Err(err) => {
                             warn!(error = %err, "backup verification failed");
                             self.status = format!("Backup verification failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::EnginePresets(result) => {
+                    match result {
+                        Ok(presets) => {
+                            info!(count = presets.len(), "engine presets loaded");
+                            self.engine_presets = presets;
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "engine presets unavailable");
+                            self.status = format!("Engine presets unavailable: {err}");
+                        }
+                    }
+                }
+                ClientEvent::ProjectSyncChecked(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(report) => {
+                            info!(
+                                project_id = %report.project_id,
+                                engine = %report.engine,
+                                assets = report.items.len(),
+                                issues = report.issue_count(),
+                                "project sync checked"
+                            );
+                            self.status = format!(
+                                "Project sync: {}/{} assets clean · {} issues",
+                                report.in_sync_count(),
+                                report.items.len(),
+                                report.issue_count()
+                            );
+                            self.project_sync_report = Some(report);
+                            self.show_project_sync = true;
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "project sync check failed");
+                            self.status = format!("Project sync check failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::ProjectSyncRepaired(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(report) => {
+                            info!(
+                                project_id = %report.project_id,
+                                assets = report.items.len(),
+                                issues = report.issue_count(),
+                                "project pinned files repaired"
+                            );
+                            self.status = format!(
+                                "Pinned project files repaired · {} issues remain",
+                                report.issue_count()
+                            );
+                            self.project_sync_report = Some(report);
+                            self.show_project_sync = true;
+                            if let Some(project) = self.selected_project().cloned() {
+                                let _ = write_project_license_files(&self.base_url(), &project);
+                            }
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "project sync repair failed");
+                            self.status = format!("Project repair failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::ProjectSyncUpdated(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(report) => {
+                            info!(
+                                project_id = %report.project_id,
+                                assets = report.items.len(),
+                                issues = report.issue_count(),
+                                "project updated to latest revisions"
+                            );
+                            self.status = format!(
+                                "Project updated to latest revisions · {} issues remain",
+                                report.issue_count()
+                            );
+                            self.project_sync_report = Some(report);
+                            self.show_project_sync = true;
+                            if let Some(project) = self.selected_project().cloned() {
+                                let _ = write_project_license_files(&self.base_url(), &project);
+                            }
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "project update to latest failed");
+                            self.status = format!("Project update failed: {err}");
                         }
                     }
                 }
@@ -1637,6 +1798,7 @@ impl DragonForgeClient {
                 self.check_server();
                 self.refresh_semantic_status();
                 self.refresh_backup_status();
+                self.refresh_engine_presets();
                 self.refresh_assets();
                 self.refresh_projects();
             }
@@ -1844,6 +2006,33 @@ impl DragonForgeClient {
                 .clicked()
             {
                 self.refresh_project_license_files();
+            }
+            if ui
+                .add_enabled(
+                    self.selected_project_id.is_some() && self.busy_count == 0,
+                    egui::Button::new("Check Project Sync"),
+                )
+                .clicked()
+            {
+                self.check_selected_project_sync();
+            }
+            if ui
+                .add_enabled(
+                    self.selected_project_id.is_some() && self.busy_count == 0,
+                    egui::Button::new("Repair Pinned Files"),
+                )
+                .clicked()
+            {
+                self.repair_selected_project_sync();
+            }
+            if ui
+                .add_enabled(
+                    self.selected_project_id.is_some() && self.busy_count == 0,
+                    egui::Button::new("Update Project to Latest"),
+                )
+                .clicked()
+            {
+                self.update_selected_project_to_latest();
             }
 
             if ui
@@ -2329,6 +2518,73 @@ impl DragonForgeClient {
             });
     }
 
+    fn project_sync_window(&mut self, ctx: &egui::Context) {
+        if !self.show_project_sync {
+            return;
+        }
+        let mut open = self.show_project_sync;
+        let report = self.project_sync_report.clone();
+        egui::Window::new("Project Sync Status")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(720.0)
+            .show(ctx, |ui| {
+                let Some(report) = report else {
+                    ui.label("No project sync report loaded.");
+                    return;
+                };
+                ui.heading(format!("{} ({})", report.project_name, report.engine));
+                ui.label(format!("Export path: {}", report.export_path));
+                ui.label(format!(
+                    "Assets: {} · In sync: {} · Issues: {}",
+                    report.items.len(),
+                    report.in_sync_count(),
+                    report.issue_count()
+                ));
+                for warning in &report.marker_warnings {
+                    ui.label(format!("⚠ {warning}"));
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                    for item in &report.items {
+                        ui.group(|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(&item.asset_name);
+                                ui.label(format!(
+                                    "pinned v{} · vault v{}",
+                                    item.pinned_version, item.current_version
+                                ));
+                                ui.label(item.status_label());
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Check Again"))
+                        .clicked()
+                    {
+                        self.check_selected_project_sync();
+                    }
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Repair Pinned Files"))
+                        .clicked()
+                    {
+                        self.repair_selected_project_sync();
+                    }
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Update to Latest Revisions"))
+                        .clicked()
+                    {
+                        self.update_selected_project_to_latest();
+                    }
+                });
+            });
+        self.show_project_sync = open;
+    }
+
     fn project_window(&mut self, ctx: &egui::Context) {
         if !self.show_project_create {
             return;
@@ -2341,7 +2597,24 @@ impl DragonForgeClient {
             .default_width(560.0)
             .show(ctx, |ui| {
                 form_row(ui, "Project Name", &mut self.project_form.name);
-                form_row(ui, "Engine", &mut self.project_form.engine);
+                ui.horizontal(|ui| {
+                    ui.label("Engine:");
+                    egui::ComboBox::from_id_salt("project_engine")
+                        .selected_text(&self.project_form.engine)
+                        .show_ui(ui, |ui| {
+                            if self.engine_presets.is_empty() {
+                                ui.selectable_value(&mut self.project_form.engine, "Generic".to_string(), "Generic");
+                            } else {
+                                for preset in &self.engine_presets {
+                                    ui.selectable_value(
+                                        &mut self.project_form.engine,
+                                        preset.id.clone(),
+                                        &preset.display_name,
+                                    );
+                                }
+                            }
+                        });
+                });
 
                 ui.horizontal(|ui| {
                     ui.label("Local Path:");
@@ -2366,7 +2639,17 @@ impl DragonForgeClient {
                         .desired_width(f32::INFINITY),
                 );
 
-                ui.label("Assets added to this project will be copied into a DragonForgeAssets folder under the selected project root.");
+                if let Some(preset) = self.engine_presets.iter()
+                    .find(|preset| preset.id.eq_ignore_ascii_case(&self.project_form.engine))
+                {
+                    ui.label(format!(
+                        "Export location: <Project>/{}",
+                        preset.export_subdir
+                    ));
+                    ui.small(&preset.import_notes);
+                } else {
+                    ui.label("Export location: <Project>/DragonForgeAssets");
+                }
 
                 ui.separator();
                 if ui
@@ -2421,7 +2704,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 10");
+                ui.label("DragonForge Client Phase 11");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -2434,6 +2717,7 @@ impl eframe::App for DragonForgeClient {
         self.package_import_window(ctx);
         self.package_contents_window(ctx);
         self.remove_project_confirm_window(ctx);
+        self.project_sync_window(ctx);
     }
 }
 
@@ -3116,7 +3400,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 10,
+        phase = 11,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
