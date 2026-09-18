@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 11 — Engine Integrations & Project Sync**
+**Phase 11.1 — Project Removal Attribution Maintenance**
 
 ### Server
 
@@ -167,3 +167,8 @@ Project engine presets now determine the default DragonForge export folder:
 Existing pre-Phase-11 project links under `DragonForgeAssets` remain supported.
 
 Use **Check Project Sync** to verify exported files against the vault using SHA-256. **Repair Pinned Files** restores the exact versions already pinned to the project without upgrading them. **Update Project to Latest** is the explicit action that advances project pins to the current vault revisions.
+
+
+## Phase 11.1 maintenance
+
+Engine-aware **Remove from Project** now immediately regenerates `CREDITS.txt`, `DragonForge-License-Manifest.json`, and `DragonForge-License-Manifest.csv` after a successful project unlink. A manifest-write failure is reported without undoing the already-successful removal.
