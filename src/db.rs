@@ -105,6 +105,16 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS package_dependencies (
+            asset_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            dependency_path TEXT NOT NULL,
+            missing INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(asset_id, version_number, dependency_path),
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS asset_versions (
             id TEXT PRIMARY KEY NOT NULL,
             asset_id TEXT NOT NULL,
@@ -132,6 +142,7 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_asset_versions_sha ON asset_versions(sha256)",
         "CREATE INDEX IF NOT EXISTS idx_package_files_asset ON package_files(asset_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_package_files_sha ON package_files(sha256)",
+        "CREATE INDEX IF NOT EXISTS idx_package_dependencies_asset ON package_dependencies(asset_id, version_number)",
     ];
 
     for statement in STATEMENTS {
@@ -590,7 +601,58 @@ pub async fn clone_package_files(
             created_at: now.clone(),
         })
         .collect::<Vec<_>>();
-    replace_package_files(pool, asset_id, target_version, &cloned).await
+    replace_package_files(pool, asset_id, target_version, &cloned).await?;
+    let (referenced, missing) = list_package_dependencies(pool, asset_id, source_version).await?;
+    replace_package_dependencies(pool, asset_id, target_version, &referenced, &missing).await
+}
+
+pub async fn replace_package_dependencies(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+    referenced: &[String],
+    missing: &[String],
+) -> AppResult<()> {
+    let missing_set = missing.iter().collect::<std::collections::HashSet<_>>();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM package_dependencies WHERE asset_id = ? AND version_number = ?")
+        .bind(asset_id)
+        .bind(version_number)
+        .execute(&mut *tx)
+        .await?;
+    for dependency in referenced {
+        sqlx::query(
+            "INSERT INTO package_dependencies(asset_id, version_number, dependency_path, missing) VALUES(?, ?, ?, ?)",
+        )
+        .bind(asset_id)
+        .bind(version_number)
+        .bind(dependency)
+        .bind(missing_set.contains(dependency))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn list_package_dependencies(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+) -> AppResult<(Vec<String>, Vec<String>)> {
+    let rows = sqlx::query_as::<_, (String, bool)>(
+        "SELECT dependency_path, missing FROM package_dependencies WHERE asset_id = ? AND version_number = ? ORDER BY dependency_path COLLATE NOCASE",
+    )
+    .bind(asset_id)
+    .bind(version_number)
+    .fetch_all(pool)
+    .await?;
+    let referenced = rows.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+    let missing = rows
+        .into_iter()
+        .filter_map(|(path, is_missing)| is_missing.then_some(path))
+        .collect::<Vec<_>>();
+    Ok((referenced, missing))
 }
 
 pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
