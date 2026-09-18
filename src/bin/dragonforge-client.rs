@@ -68,6 +68,31 @@ struct AuthMeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditEvent {
+    id: String,
+    occurred_at: String,
+    actor_user_id: Option<String>,
+    actor_username: Option<String>,
+    actor_role: Option<String>,
+    workstation: Option<String>,
+    action: String,
+    method: String,
+    path: String,
+    target_type: Option<String>,
+    target_id: Option<String>,
+    result: String,
+    status_code: i64,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExportResponse {
+    generated_at: String,
+    events: Vec<AuditEvent>,
+    csv: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticStatusResponse {
     enabled: bool,
     ollama_reachable: bool,
@@ -387,6 +412,8 @@ enum ClientEvent {
     UserCreated(Result<VaultUser, String>),
     UserUpdated(Result<VaultUser, String>),
     UserDeleted(Result<String, String>),
+    AuditLoaded(Result<Vec<AuditEvent>, String>),
+    AuditExported(Result<PathBuf, String>),
     SemanticStatus(Result<SemanticStatusResponse, String>),
     SemanticReindex(Result<ReindexResponse, String>),
     BackupStatus(Result<BackupStatusResponse, String>),
@@ -499,6 +526,15 @@ struct DragonForgeClient {
     selected_user_role: UserRole,
     selected_user_enabled: bool,
     selected_user_token: String,
+    show_activity: bool,
+    audit_events: Vec<AuditEvent>,
+    audit_username: String,
+    audit_action: String,
+    audit_result: String,
+    audit_target_type: String,
+    audit_target_id: String,
+    audit_from: String,
+    audit_to: String,
     upload: UploadForm,
     edit: EditForm,
     project_form: ProjectForm,
@@ -570,6 +606,15 @@ impl DragonForgeClient {
             selected_user_role: UserRole::Developer,
             selected_user_enabled: true,
             selected_user_token: String::new(),
+            show_activity: false,
+            audit_events: Vec::new(),
+            audit_username: String::new(),
+            audit_action: String::new(),
+            audit_result: String::new(),
+            audit_target_type: String::new(),
+            audit_target_id: String::new(),
+            audit_from: String::new(),
+            audit_to: String::new(),
             upload: UploadForm::default(),
             edit: EditForm::default(),
             project_form: ProjectForm::default(),
@@ -614,6 +659,44 @@ impl DragonForgeClient {
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| "unknown-workstation".to_string());
         (holder, workstation)
+    }
+
+    fn can_write(&self) -> bool {
+        if self.health.as_ref().is_some_and(|health| !health.auth_enabled) {
+            return true;
+        }
+        self.auth_me
+            .as_ref()
+            .and_then(|me| me.role.as_ref())
+            .is_some_and(|role| matches!(role, UserRole::Administrator | UserRole::Developer))
+    }
+
+    fn is_admin(&self) -> bool {
+        if self.health.as_ref().is_some_and(|health| !health.auth_enabled) {
+            return true;
+        }
+        self.auth_me
+            .as_ref()
+            .and_then(|me| me.role.as_ref())
+            .is_some_and(|role| *role == UserRole::Administrator)
+    }
+
+    fn audit_query_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = vec![("limit".to_string(), "500".to_string())];
+        for (key, value) in [
+            ("username", self.audit_username.trim()),
+            ("action", self.audit_action.trim()),
+            ("result", self.audit_result.trim()),
+            ("target_type", self.audit_target_type.trim()),
+            ("target_id", self.audit_target_id.trim()),
+            ("from", self.audit_from.trim()),
+            ("to", self.audit_to.trim()),
+        ] {
+            if !value.is_empty() {
+                pairs.push((key.to_string(), value.to_string()));
+            }
+        }
+        pairs
     }
 
     fn checkout_identity(&self) -> (String, String) {
@@ -787,6 +870,75 @@ impl DragonForgeClient {
             })();
             let _ = tx.send(ClientEvent::UserDeleted(result));
         });
+    }
+
+    fn refresh_activity(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let query = self.audit_query_pairs();
+        self.status = "Loading activity history...".to_string();
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<AuditEvent>, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/audit"))
+                    .query(&query)
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::AuditLoaded(result));
+        });
+    }
+
+    fn export_activity(&mut self) {
+        if !self.is_admin() {
+            self.status = "Administrator role is required for audit export.".to_string();
+            return;
+        }
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Choose audit export folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let query = self.audit_query_pairs();
+        self.busy_count += 1;
+        thread::spawn(move || {
+            let result = (|| -> Result<PathBuf, String> {
+                let response: AuditExportResponse = Self::api_client()?
+                    .get(format!("{base}/api/audit/export"))
+                    .query(&query)
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())?;
+                let stamp = response.generated_at.replace([':', '.'], "-");
+                let json_path = folder.join(format!("DragonForge-Audit-{stamp}.json"));
+                let csv_path = folder.join(format!("DragonForge-Audit-{stamp}.csv"));
+                fs::write(
+                    &json_path,
+                    serde_json::to_string_pretty(&response.events).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                fs::write(&csv_path, response.csv).map_err(|e| e.to_string())?;
+                Ok(json_path)
+            })();
+            let _ = tx.send(ClientEvent::AuditExported(result));
+        });
+    }
+
+    fn open_asset_activity(&mut self, asset_id: &str) {
+        self.audit_target_type = "asset".to_string();
+        self.audit_target_id = asset_id.to_string();
+        self.show_activity = true;
+        self.refresh_activity();
     }
 
     fn refresh_semantic_status(&mut self) {
@@ -1794,6 +1946,22 @@ impl DragonForgeClient {
                         Err(err) => self.status = format!("Delete user failed: {err}"),
                     }
                 }
+                ClientEvent::AuditLoaded(result) => {
+                    match result {
+                        Ok(events) => {
+                            self.status = format!("{} activity events loaded", events.len());
+                            self.audit_events = events;
+                        }
+                        Err(err) => self.status = format!("Activity load failed: {err}"),
+                    }
+                }
+                ClientEvent::AuditExported(result) => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(path) => self.status = format!("Audit JSON/CSV exported beside {}", path.display()),
+                        Err(err) => self.status = format!("Audit export failed: {err}"),
+                    }
+                }
                 ClientEvent::SemanticStatus(result) => {
                     match result {
                         Ok(status) => {
@@ -2375,6 +2543,7 @@ impl DragonForgeClient {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let is_admin = self.is_admin();
         ui.horizontal(|ui| {
             ui.heading("DragonForge Asset Vault");
             ui.separator();
@@ -2425,7 +2594,7 @@ impl DragonForgeClient {
             };
             ui.label(backup_label);
             if ui
-                .add_enabled(self.busy_count == 0, egui::Button::new("Create Backup"))
+                .add_enabled(self.busy_count == 0 && is_admin, egui::Button::new("Create Backup"))
                 .clicked()
             {
                 self.create_vault_backup();
@@ -2433,6 +2602,7 @@ impl DragonForgeClient {
             if ui
                 .add_enabled(
                     self.busy_count == 0
+                        && is_admin
                         && self.backup_status.as_ref().is_some_and(|status| !status.backups.is_empty()),
                     egui::Button::new("Verify Latest"),
                 )
@@ -2477,11 +2647,17 @@ impl DragonForgeClient {
             let (_, identity_workstation) = Self::workstation_identity();
             ui.label(format!("Workstation: {}", identity_workstation));
             ui.separator();
+            if ui.button("Activity").clicked() {
+                self.show_activity = true;
+                self.refresh_activity();
+            }
+            ui.separator();
             ui.label(&self.status);
         });
     }
 
     fn filter_bar(&mut self, ui: &mut egui::Ui) {
+        let can_write = self.can_write();
         ui.horizontal_wrapped(|ui| {
             ui.label("Search");
             let search_response = ui.add(
@@ -2558,7 +2734,7 @@ impl DragonForgeClient {
                 None => "AI: status unknown".to_string(),
             };
             ui.label(semantic_label);
-            if ui.button("Reindex AI Search").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Reindex AI Search")).clicked() {
                 self.reindex_semantic_search();
             }
             if ui.button("AI Status").clicked() {
@@ -2577,7 +2753,7 @@ impl DragonForgeClient {
             }
 
             ui.separator();
-            if ui.button("Add Asset").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Add Asset")).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Select an asset to add")
                     .pick_file()
@@ -2585,7 +2761,7 @@ impl DragonForgeClient {
                     self.begin_upload(path);
                 }
             }
-            if ui.button("Add Package ZIP").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Add Package ZIP")).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Select a multi-file asset ZIP")
                     .add_filter("ZIP package", &["zip"])
@@ -2615,7 +2791,7 @@ impl DragonForgeClient {
                     }
                 });
 
-            if ui.button("New Project").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("New Project")).clicked() {
                 self.show_project_create = true;
             }
             if ui
@@ -2638,7 +2814,7 @@ impl DragonForgeClient {
             }
             if ui
                 .add_enabled(
-                    self.selected_project_id.is_some() && self.busy_count == 0,
+                    can_write && self.selected_project_id.is_some() && self.busy_count == 0,
                     egui::Button::new("Repair Pinned Files"),
                 )
                 .clicked()
@@ -2647,7 +2823,7 @@ impl DragonForgeClient {
             }
             if ui
                 .add_enabled(
-                    self.selected_project_id.is_some() && self.busy_count == 0,
+                    can_write && self.selected_project_id.is_some() && self.busy_count == 0,
                     egui::Button::new("Update Project to Latest"),
                 )
                 .clicked()
@@ -2657,7 +2833,8 @@ impl DragonForgeClient {
 
             if ui
                 .add_enabled(
-                    self.selected_id.is_some()
+                    can_write
+                        && self.selected_id.is_some()
                         && self.selected_project_id.is_some()
                         && !self.deleted_only,
                     egui::Button::new("Add Selected to Project"),
@@ -2761,6 +2938,7 @@ impl DragonForgeClient {
     }
 
     fn details_panel(&mut self, ui: &mut egui::Ui) {
+        let can_write = self.can_write();
         ui.heading(if self.deleted_only {
             "Recycle Bin Details"
         } else {
@@ -2846,7 +3024,7 @@ impl DragonForgeClient {
                 }
                 if checkout.holder == identity_user && checkout.workstation == identity_workstation {
                     if ui
-                        .add_enabled(self.busy_count == 0, egui::Button::new("Check In"))
+                        .add_enabled(self.busy_count == 0 && can_write, egui::Button::new("Check In"))
                         .clicked()
                     {
                         self.checkin_selected();
@@ -2866,7 +3044,7 @@ impl DragonForgeClient {
                 });
                 if ui
                     .add_enabled(
-                        self.busy_count == 0 && asset.deleted_at.is_none(),
+                        self.busy_count == 0 && can_write && asset.deleted_at.is_none(),
                         egui::Button::new("Check Out"),
                     )
                     .clicked()
@@ -2898,14 +3076,14 @@ impl DragonForgeClient {
                     ui.label("Archive tier is not configured on the server.");
                 } else if storage_status.tier == "archive" {
                     if ui
-                        .add_enabled(self.busy_count == 0, egui::Button::new("Recall to Hot Storage"))
+                        .add_enabled(self.busy_count == 0 && can_write, egui::Button::new("Recall to Hot Storage"))
                         .clicked()
                     {
                         self.recall_selected();
                     }
                 } else if ui
                     .add_enabled(
-                        self.busy_count == 0 && asset.deleted_at.is_none(),
+                        self.busy_count == 0 && can_write && asset.deleted_at.is_none(),
                         egui::Button::new("Archive Asset"),
                     )
                     .clicked()
@@ -2930,18 +3108,21 @@ impl DragonForgeClient {
         ui.add_space(8.0);
 
         if asset.deleted_at.is_some() {
-            if ui.button("Restore Asset").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Restore Asset")).clicked() {
                 self.restore_selected();
             }
         } else {
             if ui.button("Download Asset").clicked() {
                 self.download_selected();
             }
-            if ui.button("Edit Metadata").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Edit Metadata")).clicked() {
                 self.begin_edit_selected();
             }
             if ui.button("Version History").clicked() {
                 self.open_versions_selected();
+            }
+            if ui.button("Asset Activity").clicked() {
+                self.open_asset_activity(&asset.id);
             }
             if ui.button("Package / Dependencies").clicked() {
                 self.open_package_contents();
@@ -3035,7 +3216,7 @@ impl DragonForgeClient {
                 );
                 ui.separator();
                 if ui
-                    .add_enabled(self.busy_count == 0, egui::Button::new("Save Changes"))
+                    .add_enabled(self.busy_count == 0 && self.can_write(), egui::Button::new("Save Changes"))
                     .clicked()
                 {
                     self.submit_edit();
@@ -3077,10 +3258,10 @@ impl DragonForgeClient {
                             .desired_width(320.0)
                             .hint_text("What changed?"),
                     );
-                    if ui.button("Upload New Version").clicked() {
+                    if ui.add_enabled(self.can_write(), egui::Button::new("Upload New Version")).clicked() {
                         self.upload_new_version();
                     }
-                    if ui.button("Upload Package Version ZIP").clicked() {
+                    if ui.add_enabled(self.can_write(), egui::Button::new("Upload Package Version ZIP")).clicked() {
                         self.upload_package_version();
                     }
                 });
@@ -3145,7 +3326,7 @@ impl DragonForgeClient {
                 ui.add(egui::TextEdit::multiline(&mut self.package_form.description)
                     .desired_rows(3).desired_width(f32::INFINITY));
                 ui.separator();
-                if ui.add_enabled(self.busy_count == 0, egui::Button::new("Import Package")).clicked() {
+                if ui.add_enabled(self.busy_count == 0 && self.can_write(), egui::Button::new("Import Package")).clicked() {
                     self.submit_package_import();
                 }
             });
@@ -3220,7 +3401,7 @@ impl DragonForgeClient {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(self.busy_count == 0, egui::Button::new("Remove from Project"))
+                        .add_enabled(self.busy_count == 0 && self.can_write(), egui::Button::new("Remove from Project"))
                         .clicked()
                     {
                         self.confirm_remove_selected_from_project();
@@ -3232,6 +3413,93 @@ impl DragonForgeClient {
                     }
                 });
             });
+    }
+
+    fn activity_window(&mut self, ctx: &egui::Context) {
+        if !self.show_activity {
+            return;
+        }
+        let mut open = self.show_activity;
+        let is_admin = self.is_admin();
+        egui::Window::new("DragonForge Activity")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(980.0)
+            .default_height(650.0)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("User");
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_username).desired_width(100.0));
+                    ui.label("Action");
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_action).desired_width(130.0));
+                    ui.label("Result");
+                    egui::ComboBox::from_id_salt("audit_result")
+                        .selected_text(if self.audit_result.is_empty() { "All" } else { &self.audit_result })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.audit_result, String::new(), "All");
+                            ui.selectable_value(&mut self.audit_result, "success".to_string(), "Success");
+                            ui.selectable_value(&mut self.audit_result, "failure".to_string(), "Failure");
+                        });
+                    ui.label("Target");
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_target_type).desired_width(75.0).hint_text("asset"));
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_target_id).desired_width(150.0).hint_text("id"));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("From");
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_from).desired_width(190.0).hint_text("RFC3339 timestamp"));
+                    ui.label("To");
+                    ui.add(egui::TextEdit::singleline(&mut self.audit_to).desired_width(190.0).hint_text("RFC3339 timestamp"));
+                    if ui.button("Refresh Activity").clicked() {
+                        self.refresh_activity();
+                    }
+                    if is_admin && ui.button("Export JSON + CSV").clicked() {
+                        self.export_activity();
+                    }
+                    if ui.button("Clear Filters").clicked() {
+                        self.audit_username.clear();
+                        self.audit_action.clear();
+                        self.audit_result.clear();
+                        self.audit_target_type.clear();
+                        self.audit_target_id.clear();
+                        self.audit_from.clear();
+                        self.audit_to.clear();
+                        self.refresh_activity();
+                    }
+                });
+                ui.separator();
+                ui.label(format!("{} events", self.audit_events.len()));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for event in &self.audit_events {
+                        ui.group(|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(&event.action);
+                                ui.label(format!("{} · HTTP {}", event.result, event.status_code));
+                                ui.label(&event.occurred_at);
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!(
+                                    "User: {} ({}) @ {}",
+                                    event.actor_username.as_deref().unwrap_or("anonymous"),
+                                    event.actor_role.as_deref().unwrap_or("unknown"),
+                                    event.workstation.as_deref().unwrap_or("unknown")
+                                ));
+                                if let Some(kind) = event.target_type.as_deref() {
+                                    ui.label(format!(
+                                        "Target: {} {}",
+                                        kind,
+                                        event.target_id.as_deref().unwrap_or("")
+                                    ));
+                                }
+                            });
+                            ui.small(format!("{} {}", event.method, event.path));
+                            if let Some(detail) = event.detail.as_deref() {
+                                ui.small(format!("Detail: {detail}"));
+                            }
+                        });
+                    }
+                });
+            });
+        self.show_activity = open;
     }
 
     fn user_management_window(&mut self, ctx: &egui::Context) {
@@ -3458,6 +3726,7 @@ impl DragonForgeClient {
                 if ui
                     .add_enabled(
                         self.busy_count == 0
+                            && self.can_write()
                             && !self.project_form.name.trim().is_empty()
                             && !self.project_form.local_path.trim().is_empty(),
                         egui::Button::new("Create Project"),
@@ -3512,7 +3781,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 14 · Phase 13 Security");
+                ui.label("DragonForge Client Phase 15");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -3525,6 +3794,7 @@ impl eframe::App for DragonForgeClient {
         self.package_import_window(ctx);
         self.package_contents_window(ctx);
         self.remove_project_confirm_window(ctx);
+        self.activity_window(ctx);
         self.user_management_window(ctx);
         self.project_sync_window(ctx);
     }
@@ -3987,7 +4257,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 14,
+        phase = 15,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
