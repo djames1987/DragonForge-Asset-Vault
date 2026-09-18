@@ -52,12 +52,6 @@ pub fn normalize_license(value: Option<&str>) -> String {
     }
 }
 
-pub fn preset(id: &str) -> Option<&'static LicensePreset> {
-    LICENSE_PRESETS
-        .iter()
-        .find(|item| item.id.eq_ignore_ascii_case(id))
-}
-
 pub fn assess(row: &AssetRow) -> LicenseAssessment {
     let license_id = normalize_license(row.license.as_deref());
     let mut warnings = Vec::new();
