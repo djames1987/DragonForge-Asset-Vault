@@ -11,6 +11,7 @@ mod routes;
 mod semantic;
 mod storage;
 mod thumbnail;
+mod tiering;
 
 use anyhow::Context;
 use config::AppConfig;
@@ -45,7 +46,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&config.database_path())
         .await
         .context("failed to initialize asset catalog database")?;
-    let storage = storage::Storage::new(config.storage.data_dir.clone())
+    let storage = storage::Storage::new(
+        config.storage.data_dir.clone(),
+        config.storage.archive_dir.clone(),
+    )
         .await
         .context("failed to initialize asset storage")?;
 
