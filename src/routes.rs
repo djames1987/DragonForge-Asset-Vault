@@ -107,7 +107,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 9,
+        phase: 10,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
