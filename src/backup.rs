@@ -204,8 +204,8 @@ async fn sqlite_snapshot(db: &SqlitePool, target: &Path) -> AppResult<()> {
     }
     let escaped = target
         .to_string_lossy()
-        .replace(''', "''")
-        .replace('\', "/");
+        .replace('\'', "''")
+        .replace('\\', "/");
     let sql = format!("VACUUM INTO '{escaped}'");
     sqlx::query(&sql).execute(db).await?;
     Ok(())
