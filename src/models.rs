@@ -363,3 +363,22 @@ pub struct BackupStatusResponse {
     pub keep: usize,
     pub backups: Vec<BackupSummary>,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnginePreset {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub export_subdir: &'static str,
+    pub project_markers: &'static [&'static str],
+    pub import_notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectExportPlan {
+    pub project_id: String,
+    pub engine: String,
+    pub export_subdir: String,
+    pub export_path: String,
+    pub import_notes: String,
+}
