@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 16 — Modern Desktop UI/UX Overhaul**
+**Phase 16.1 — DragonForge Visual Redesign**
 
 ### Server
 
@@ -76,7 +76,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - Administrator JSON + CSV activity export
 - role-aware disabled mutation controls for Read-only users
 - modern sidebar navigation and dedicated application views
-- responsive asset-card grid and collapsible Inspector
+- password-manager-inspired three-column asset workflow
+- fixed-width searchable asset list instead of the Phase 16 card grid
+- large asset detail/preview workspace
+- orange-accent DragonForge visual system
 - dedicated Projects, Activity, Backups, AI Search, Users, and Settings pages
 - persistent theme, UI scale, card size, and layout preferences
 
@@ -308,3 +311,22 @@ Settings
 The Asset Library now uses an adaptive card grid that responds to available width and a redesigned Inspector with collapsible General, Collaboration, Versions & Package, Project, Storage, and Actions sections.
 
 Appearance/layout preferences are persisted in the existing client settings JSON, including dark/light mode, UI scale, asset card width, sidebar width, inspector width, filter visibility, and last active view.
+
+
+## Phase 16.1 visual redesign
+
+Phase 16.1 replaces the Phase 16 card-grid presentation with a visual layout modeled on the established DragonForge Password Manager design language.
+
+The Assets view now uses:
+
+```text
+Brand/navigation sidebar | Searchable asset list | Large asset detail workspace
+```
+
+The left navigation uses a DragonForge logo block, a prominent orange **Add Asset** action, grouped navigation, and a bottom connection/account card.
+
+The middle asset browser is intentionally fixed-width and list-oriented so names and metadata no longer collapse into narrow wrapped columns.
+
+The right workspace provides a large preview, primary actions, and clearly separated General, Tags, Collaboration, Storage, Project, and More sections.
+
+The dark theme uses a blue-black base, raised panels, muted blue-gray secondary text, and a restrained orange accent derived from the password-manager reference.
