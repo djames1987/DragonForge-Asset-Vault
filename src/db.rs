@@ -4,8 +4,8 @@ use crate::{
     models::{
         Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetRequest,
-        SemanticEmbeddingRow, StatsResponse, StorageObjectRef, UpdateAssetRequest,
-        UpdateProjectRequest,
+        CreateUserRequest, SemanticEmbeddingRow, StatsResponse, StorageObjectRef,
+        UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole, VaultUser,
     },
 };
 use sqlx::{
@@ -118,6 +118,18 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS vault_users (
+            id TEXT PRIMARY KEY NOT NULL,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            role TEXT NOT NULL CHECK(role IN ('administrator', 'developer', 'read_only')),
+            token_hash TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_used_at TEXT
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS asset_storage_tiers (
             asset_id TEXT PRIMARY KEY NOT NULL,
             tier TEXT NOT NULL CHECK(tier IN ('hot', 'archive')),
@@ -177,6 +189,8 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_package_dependencies_asset ON package_dependencies(asset_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model ON semantic_embeddings(model)",
         "CREATE INDEX IF NOT EXISTS idx_asset_checkouts_holder ON asset_checkouts(holder, workstation)",
+        "CREATE INDEX IF NOT EXISTS idx_vault_users_username ON vault_users(username)",
+        "CREATE INDEX IF NOT EXISTS idx_vault_users_token_hash ON vault_users(token_hash)",
     ];
 
     for statement in STATEMENTS {
@@ -216,6 +230,137 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+pub async fn list_users(pool: &SqlitePool) -> AppResult<Vec<VaultUser>> {
+    Ok(sqlx::query_as::<_, VaultUser>(
+        "SELECT id, username, role, enabled, created_at, updated_at, last_used_at FROM vault_users ORDER BY username COLLATE NOCASE",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_user_by_token_hash(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> AppResult<Option<VaultUser>> {
+    Ok(sqlx::query_as::<_, VaultUser>(
+        "SELECT id, username, role, enabled, created_at, updated_at, last_used_at FROM vault_users WHERE token_hash = ?",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn count_users(pool: &SqlitePool) -> AppResult<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM vault_users")
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn create_user(
+    pool: &SqlitePool,
+    request: CreateUserRequest,
+    token_hash: String,
+) -> AppResult<VaultUser> {
+    let username = request.username.trim();
+    if username.is_empty() {
+        return Err(AppError::BadRequest("username cannot be empty".to_string()));
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO vault_users(id, username, role, token_hash, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, 1, ?, ?)",
+    )
+    .bind(&id)
+    .bind(username)
+    .bind(request.role.as_str())
+    .bind(token_hash)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    get_user(pool, &id).await
+}
+
+pub async fn get_user(pool: &SqlitePool, id: &str) -> AppResult<VaultUser> {
+    sqlx::query_as::<_, VaultUser>(
+        "SELECT id, username, role, enabled, created_at, updated_at, last_used_at FROM vault_users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+pub async fn update_user(
+    pool: &SqlitePool,
+    id: &str,
+    request: UpdateUserRequest,
+    token_hash: Option<String>,
+) -> AppResult<VaultUser> {
+    let current = get_user(pool, id).await?;
+    let role = request.role
+        .map(|role| role.as_str().to_string())
+        .unwrap_or(current.role.clone());
+    let enabled = request.enabled.unwrap_or(current.enabled);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if let Some(token_hash) = token_hash {
+        sqlx::query("UPDATE vault_users SET role = ?, enabled = ?, token_hash = ?, updated_at = ? WHERE id = ?")
+            .bind(&role)
+            .bind(enabled)
+            .bind(token_hash)
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    } else {
+        sqlx::query("UPDATE vault_users SET role = ?, enabled = ?, updated_at = ? WHERE id = ?")
+            .bind(&role)
+            .bind(enabled)
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    get_user(pool, id).await
+}
+
+pub async fn delete_user(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let result = sqlx::query("DELETE FROM vault_users WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn touch_user(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    sqlx::query("UPDATE vault_users SET last_used_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn ensure_bootstrap_admin(
+    pool: &SqlitePool,
+    username: &str,
+    token_hash: &str,
+) -> AppResult<Option<VaultUser>> {
+    if count_users(pool).await? > 0 {
+        return Ok(None);
+    }
+    let request = CreateUserRequest {
+        username: username.to_string(),
+        role: UserRole::Administrator,
+        token: String::new(),
+    };
+    Ok(Some(create_user(pool, request, token_hash.to_string()).await?))
 }
 
 pub async fn get_asset(pool: &SqlitePool, id: &str, include_deleted: bool) -> AppResult<Asset> {
