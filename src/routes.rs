@@ -1,10 +1,12 @@
 use crate::{
     db,
+    package,
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, CreateProjectRequest, DeleteResponse, HealthResponse,
-        ProjectAssetRequest, RestoreResponse, RestoreVersionRequest, UpdateAssetRequest,
-        UpdateProjectRequest, UploadMetadata, UploadResponse,
+        PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
+        RestoreResponse, RestoreVersionRequest, UpdateAssetRequest, UpdateProjectRequest,
+        UploadMetadata, UploadResponse,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
@@ -44,6 +46,14 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
         .route("/api/assets/:id/preview", get(asset_preview))
         .route("/api/assets/:id/restore", axum::routing::post(restore_asset))
+        .route("/api/packages", axum::routing::post(import_package))
+        .route("/api/assets/:id/package", get(get_current_package))
+        .route("/api/assets/:id/package-versions", axum::routing::post(upload_package_version))
+        .route("/api/assets/:id/versions/:version/package", get(get_package_version_manifest))
+        .route(
+            "/api/assets/:id/versions/:version/package/files/:file_id/download",
+            get(download_package_file),
+        )
         .route(
             "/api/assets/:id/versions",
             get(list_asset_versions).post(upload_asset_version),
@@ -80,7 +90,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 6,
+        phase: 7,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -368,7 +378,14 @@ async fn asset_preview(
 ) -> AppResult<Response> {
     info!(asset_id = %id, "preview requested");
     let asset = db::get_asset(&state.db, &id, false).await?;
-    let Some(path) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await? else {
+    let package_files = db::list_package_files(&state.db, &id, asset.current_version).await?;
+    let Some(path) = if package_files.is_empty() {
+        thumbnail::get_or_create_preview(&state.storage, &asset.row).await?
+    } else {
+        thumbnail::get_or_create_package_preview(
+            &state.storage, &asset.row, asset.current_version, &package_files
+        ).await?
+    } else {
         info!(
             asset_id = %id,
             extension = ?asset.row.extension,
@@ -563,6 +580,260 @@ async fn restore_asset_version(
     Ok(Json(asset))
 }
 
+async fn import_package(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> AppResult<impl IntoResponse> {
+    info!("package import requested");
+    let mut metadata = UploadMetadata::default();
+    let mut incoming: Option<IncomingFile> = None;
+    let mut primary_path: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await? {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "file" => incoming = Some(storage::stream_field_to_temp(&state.storage, field).await?),
+            "primary_path" => primary_path = clean_optional(field.text().await?),
+            "name" => metadata.name = clean_optional(field.text().await?),
+            "category" => metadata.category = clean_optional(field.text().await?),
+            "description" => metadata.description = clean_optional(field.text().await?),
+            "source_url" => metadata.source_url = clean_optional(field.text().await?),
+            "creator" => metadata.creator = clean_optional(field.text().await?),
+            "license" => metadata.license = clean_optional(field.text().await?),
+            "attribution_required" => metadata.attribution_required = parse_bool(&field.text().await?)?,
+            "tags" => {
+                metadata.tags = field.text().await?.split(',')
+                    .map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
+            }
+            _ => {}
+        }
+    }
+
+    let incoming = incoming.ok_or_else(|| AppError::BadRequest("package ZIP file is required".to_string()))?;
+    if incoming.extension.as_deref() != Some("zip") {
+        state.storage.remove_temp(&incoming.temp_path).await;
+        return Err(AppError::BadRequest("package import requires a .zip file".to_string()));
+    }
+
+    let extracted = package::extract_zip(incoming.temp_path.clone(), primary_path).await?;
+    state.storage.remove_temp(&incoming.temp_path).await;
+
+    let asset_id = Uuid::new_v4().to_string();
+    let stored = package::store_extracted_package(&state.storage, &asset_id, 1, extracted).await?;
+    let primary = stored.files.iter().find(|file| file.is_primary)
+        .cloned().ok_or_else(|| AppError::BadRequest("package has no primary file".to_string()))?;
+
+    if db::get_asset_by_hash(&state.db, &primary.sha256).await?.is_some() {
+        return Err(AppError::Conflict(
+            "an asset with the same primary file already exists".to_string(),
+        ));
+    }
+
+    let fallback_name = std::path::Path::new(&stored.primary_path)
+        .file_stem().and_then(|v| v.to_str()).unwrap_or("Package").to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let row = AssetRow {
+        id: asset_id.clone(),
+        name: metadata.name.unwrap_or(fallback_name),
+        original_filename: primary.original_filename.clone(),
+        extension: primary.extension.clone(),
+        mime_type: primary.mime_type.clone(),
+        byte_size: primary.byte_size,
+        sha256: primary.sha256.clone(),
+        storage_path: primary.storage_path.clone(),
+        category: metadata.category,
+        description: metadata.description,
+        source_url: metadata.source_url,
+        creator: metadata.creator,
+        license: metadata.license,
+        attribution_required: metadata.attribution_required,
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+    };
+    let asset = db::insert_asset(&state.db, &row, &metadata.tags).await?;
+    db::replace_package_files(&state.db, &asset_id, 1, &stored.files).await?;
+    db::replace_package_dependencies(
+        &state.db, &asset_id, 1,
+        &stored.referenced_dependencies, &stored.missing_dependencies,
+    ).await?;
+
+    let manifest = PackageManifest {
+        asset_id: asset_id.clone(),
+        version_number: 1,
+        primary_path: stored.primary_path,
+        files: stored.files,
+        referenced_dependencies: stored.referenced_dependencies,
+        missing_dependencies: stored.missing_dependencies,
+    };
+
+    if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_package_preview(
+            &state.storage, &asset.row, 1, &manifest.files
+        ).await {
+            warn!(asset_id = %asset_id, error = %err, "package imported but preview generation failed");
+        }
+    }
+
+    info!(
+        asset_id = %asset_id,
+        file_count = manifest.files.len(),
+        missing_dependencies = manifest.missing_dependencies.len(),
+        "package imported"
+    );
+    Ok((StatusCode::CREATED, Json(PackageImportResponse { asset, manifest })))
+}
+
+async fn get_current_package(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let asset = db::get_asset(&state.db, &id, false).await?;
+    Ok(Json(build_package_manifest(&state, &id, asset.current_version).await?))
+}
+
+async fn get_package_version_manifest(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, i64)>,
+) -> AppResult<impl IntoResponse> {
+    Ok(Json(build_package_manifest(&state, &id, version).await?))
+}
+
+async fn upload_package_version(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> AppResult<impl IntoResponse> {
+    let current = db::get_asset(&state.db, &id, false).await?;
+    let mut incoming: Option<IncomingFile> = None;
+    let mut primary_path: Option<String> = None;
+    let mut note: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await? {
+        match field.name().unwrap_or_default() {
+            "file" => incoming = Some(storage::stream_field_to_temp(&state.storage, field).await?),
+            "primary_path" => primary_path = clean_optional(field.text().await?),
+            "note" => note = clean_optional(field.text().await?),
+            _ => {}
+        }
+    }
+
+    let incoming = incoming.ok_or_else(|| AppError::BadRequest("package ZIP file is required".to_string()))?;
+    if incoming.extension.as_deref() != Some("zip") {
+        state.storage.remove_temp(&incoming.temp_path).await;
+        return Err(AppError::BadRequest("package version requires a .zip file".to_string()));
+    }
+
+    let extracted = package::extract_zip(incoming.temp_path.clone(), primary_path).await?;
+    state.storage.remove_temp(&incoming.temp_path).await;
+
+    let next_version = current.current_version + 1;
+    let stored = package::store_extracted_package(&state.storage, &id, next_version, extracted).await?;
+    let primary = stored.files.iter().find(|file| file.is_primary)
+        .cloned().ok_or_else(|| AppError::BadRequest("package has no primary file".to_string()))?;
+
+    let asset = db::add_package_version(
+        &state.db, &id,
+        primary.original_filename.clone(), primary.extension.clone(), primary.mime_type.clone(),
+        primary.byte_size, primary.sha256.clone(), primary.storage_path.clone(), note,
+    ).await?;
+
+    db::replace_package_files(&state.db, &id, asset.current_version, &stored.files).await?;
+    db::replace_package_dependencies(
+        &state.db, &id, asset.current_version,
+        &stored.referenced_dependencies, &stored.missing_dependencies,
+    ).await?;
+
+    let manifest = PackageManifest {
+        asset_id: id.clone(),
+        version_number: asset.current_version,
+        primary_path: stored.primary_path,
+        files: stored.files,
+        referenced_dependencies: stored.referenced_dependencies,
+        missing_dependencies: stored.missing_dependencies,
+    };
+
+    if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_package_preview(
+            &state.storage, &asset.row, asset.current_version, &manifest.files
+        ).await {
+            warn!(asset_id = %id, error = %err, "package version stored but preview generation failed");
+        }
+    }
+
+    info!(
+        asset_id = %id,
+        version = asset.current_version,
+        file_count = manifest.files.len(),
+        missing_dependencies = manifest.missing_dependencies.len(),
+        "package version stored"
+    );
+    Ok((StatusCode::CREATED, Json(PackageVersionResponse { asset, manifest })))
+}
+
+async fn download_package_file(
+    State(state): State<Arc<AppState>>,
+    Path((id, version, file_id)): Path<(String, i64, String)>,
+) -> AppResult<Response> {
+    let item = db::get_package_file(&state.db, &id, version, &file_id).await?;
+    let path = state.storage.resolve_relative(&item.storage_path)?;
+    let file = File::open(&path).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&item.byte_size.to_string())
+            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid package file length")))?,
+    );
+    if let Some(mime) = item.mime_type.as_deref() {
+        if let Ok(value) = HeaderValue::from_str(mime) {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
+    }
+    info!(
+        asset_id = %id, version, relative_path = %item.relative_path,
+        "package file download started"
+    );
+    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+}
+
+async fn build_package_manifest(
+    state: &AppState,
+    asset_id: &str,
+    version: i64,
+) -> AppResult<PackageManifest> {
+    let version_row = db::get_asset_version(&state.db, asset_id, version).await?;
+    let mut files = db::list_package_files(&state.db, asset_id, version).await?;
+    if files.is_empty() {
+        files.push(crate::models::PackageFile {
+            id: format!("single-{version}"),
+            asset_id: asset_id.to_string(),
+            version_number: version,
+            relative_path: version_row.original_filename.clone(),
+            original_filename: version_row.original_filename.clone(),
+            extension: version_row.extension.clone(),
+            mime_type: version_row.mime_type.clone(),
+            byte_size: version_row.byte_size,
+            sha256: version_row.sha256.clone(),
+            storage_path: version_row.storage_path.clone(),
+            is_primary: true,
+            created_at: version_row.created_at.clone(),
+        });
+    }
+    let primary_path = files.iter().find(|file| file.is_primary)
+        .map(|file| file.relative_path.clone())
+        .unwrap_or_else(|| version_row.original_filename.clone());
+    let (referenced_dependencies, missing_dependencies) =
+        db::list_package_dependencies(&state.db, asset_id, version).await?;
+    Ok(PackageManifest {
+        asset_id: asset_id.to_string(),
+        version_number: version,
+        primary_path,
+        files,
+        referenced_dependencies,
+        missing_dependencies,
+    })
+}
+
 async fn restore_asset(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -645,6 +916,7 @@ async fn add_project_asset(
         project_id = %id,
         asset_id = %request.asset_id,
         relative_path = ?request.relative_path,
+        version_number = ?request.version_number,
         "project asset registration requested"
     );
     let link = db::add_project_asset(&state.db, &id, request).await?;
