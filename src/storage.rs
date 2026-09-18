@@ -36,6 +36,10 @@ impl Storage {
         self.temp_dir.join(format!("{}.upload", Uuid::new_v4()))
     }
 
+    pub fn temp_directory(&self) -> PathBuf {
+        self.temp_dir.join(format!("package-{}", Uuid::new_v4()))
+    }
+
     pub fn final_path(&self, sha256: &str, extension: Option<&str>) -> PathBuf {
         let first = &sha256[0..2];
         let second = &sha256[2..4];
