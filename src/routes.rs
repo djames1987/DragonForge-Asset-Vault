@@ -1,11 +1,13 @@
 use crate::{
+    backup,
     db,
     package,
     licensing,
     semantic,
     error::{AppError, AppResult},
     models::{
-        AssetQuery, AssetRow, CreateProjectRequest, DeleteResponse, HealthResponse,
+        AssetQuery, AssetRow, BackupCreateResponse, BackupStatusResponse, BackupVerifyResponse,
+        CreateProjectRequest, DeleteResponse, HealthResponse,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
         SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, UpdateAssetRequest,
@@ -35,12 +37,16 @@ pub struct AppState {
     pub db: SqlitePool,
     pub storage: Storage,
     pub semantic: crate::config::SemanticConfig,
+    pub backup: crate::config::BackupConfig,
+    pub database_filename: String,
 }
 
 pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/stats", get(stats))
+        .route("/api/backups", get(backup_status).post(create_backup))
+        .route("/api/backups/:id/verify", axum::routing::post(verify_backup))
         .route("/api/licenses/presets", get(license_presets))
         .route("/api/search/semantic", get(semantic_search))
         .route("/api/search/semantic/status", get(semantic_status))
@@ -347,6 +353,38 @@ async fn reindex_asset_semantic(
         1,
         Vec::new(),
     )))
+}
+
+async fn backup_status(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<BackupStatusResponse>> {
+    Ok(Json(backup::status(&state.backup).await?))
+}
+
+async fn create_backup(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<BackupCreateResponse>> {
+    info!(
+        backup_directory = %state.backup.directory.display(),
+        replication_targets = state.backup.replication_targets.len(),
+        "backup requested"
+    );
+    let response = backup::create_backup(
+        &state.db,
+        state.storage.root(),
+        &state.database_filename,
+        &state.backup,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+async fn verify_backup(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<BackupVerifyResponse>> {
+    info!(backup_id = %id, "backup verification requested");
+    Ok(Json(backup::verify_named_backup(&state.backup, &id).await?))
 }
 
 async fn license_presets() -> Json<&'static [crate::models::LicensePreset]> {
