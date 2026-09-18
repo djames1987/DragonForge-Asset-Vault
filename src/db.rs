@@ -1,7 +1,7 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        Asset, AssetQuery, AssetRow, CreateProjectRequest, Project, ProjectAsset,
+        Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, Project, ProjectAsset,
         ProjectAssetRequest, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
     },
 };
@@ -79,9 +79,27 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
             project_id TEXT NOT NULL,
             asset_id TEXT NOT NULL,
             relative_path TEXT,
+            version_number INTEGER NOT NULL DEFAULT 1,
             added_at TEXT NOT NULL,
             PRIMARY KEY(project_id, asset_id),
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS asset_versions (
+            id TEXT PRIMARY KEY NOT NULL,
+            asset_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            original_filename TEXT NOT NULL,
+            extension TEXT,
+            mime_type TEXT,
+            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+            sha256 TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(asset_id, version_number),
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
         )
         "#,
@@ -92,11 +110,45 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag)",
         "CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)",
         "CREATE INDEX IF NOT EXISTS idx_project_assets_asset ON project_assets(asset_id)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_versions_asset ON asset_versions(asset_id, version_number)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_versions_sha ON asset_versions(sha256)",
     ];
 
     for statement in STATEMENTS {
         sqlx::query(statement).execute(pool).await?;
     }
+
+    let columns = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_table_info('project_assets')",
+    )
+    .fetch_all(pool)
+    .await?;
+    if !columns.iter().any(|name| name == "version_number") {
+        sqlx::query(
+            "ALTER TABLE project_assets ADD COLUMN version_number INTEGER NOT NULL DEFAULT 1",
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO asset_versions(
+            id, asset_id, version_number, original_filename, extension, mime_type,
+            byte_size, sha256, storage_path, note, created_at
+        )
+        SELECT
+            lower(hex(randomblob(16))), a.id, 1, a.original_filename, a.extension, a.mime_type,
+            a.byte_size, a.sha256, a.storage_path, 'Imported from pre-Phase-6 asset',
+            a.created_at
+        FROM assets a
+        WHERE NOT EXISTS (
+            SELECT 1 FROM asset_versions v WHERE v.asset_id = a.id
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -218,6 +270,26 @@ pub async fn insert_asset(pool: &SqlitePool, row: &AssetRow, tags: &[String]) ->
     .await?;
 
     replace_tags_tx(&mut tx, &row.id, tags).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO asset_versions(
+            id, asset_id, version_number, original_filename, extension, mime_type,
+            byte_size, sha256, storage_path, note, created_at
+        ) VALUES(?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&row.id)
+    .bind(&row.original_filename)
+    .bind(&row.extension)
+    .bind(&row.mime_type)
+    .bind(row.byte_size)
+    .bind(&row.sha256)
+    .bind(&row.storage_path)
+    .bind("Initial version")
+    .bind(&row.created_at)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     get_asset(pool, &row.id, true).await
 }
@@ -276,6 +348,123 @@ pub async fn update_asset(
 
     tx.commit().await?;
     get_asset(pool, id, true).await
+}
+
+pub async fn list_asset_versions(pool: &SqlitePool, asset_id: &str) -> AppResult<Vec<AssetVersion>> {
+    get_asset(pool, asset_id, true).await?;
+    Ok(sqlx::query_as::<_, AssetVersion>(
+        "SELECT * FROM asset_versions WHERE asset_id = ? ORDER BY version_number DESC",
+    )
+    .bind(asset_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_asset_version(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+) -> AppResult<AssetVersion> {
+    sqlx::query_as::<_, AssetVersion>(
+        "SELECT * FROM asset_versions WHERE asset_id = ? AND version_number = ?",
+    )
+    .bind(asset_id)
+    .bind(version_number)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+pub async fn add_asset_version(
+    pool: &SqlitePool,
+    asset_id: &str,
+    original_filename: String,
+    extension: Option<String>,
+    mime_type: Option<String>,
+    byte_size: i64,
+    sha256: String,
+    storage_path: String,
+    note: Option<String>,
+) -> AppResult<Asset> {
+    let current = get_asset(pool, asset_id, false).await?;
+    if current.row.sha256 == sha256 {
+        return Err(AppError::Conflict("new version is identical to the current version".to_string()));
+    }
+
+    let next_version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM asset_versions WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_one(pool)
+    .await?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO asset_versions(
+            id, asset_id, version_number, original_filename, extension, mime_type,
+            byte_size, sha256, storage_path, note, created_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(asset_id)
+    .bind(next_version)
+    .bind(&original_filename)
+    .bind(&extension)
+    .bind(&mime_type)
+    .bind(byte_size)
+    .bind(&sha256)
+    .bind(&storage_path)
+    .bind(note.as_deref())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE assets SET
+            original_filename = ?, extension = ?, mime_type = ?, byte_size = ?,
+            sha256 = ?, storage_path = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&original_filename)
+    .bind(&extension)
+    .bind(&mime_type)
+    .bind(byte_size)
+    .bind(&sha256)
+    .bind(&storage_path)
+    .bind(&now)
+    .bind(asset_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    get_asset(pool, asset_id, false).await
+}
+
+pub async fn restore_asset_version(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+    note: Option<String>,
+) -> AppResult<Asset> {
+    let version = get_asset_version(pool, asset_id, version_number).await?;
+    let restore_note = note.or_else(|| Some(format!("Restored from version {}", version_number)));
+    add_asset_version(
+        pool,
+        asset_id,
+        version.original_filename,
+        version.extension,
+        version.mime_type,
+        version.byte_size,
+        version.sha256,
+        version.storage_path,
+        restore_note,
+    )
+    .await
 }
 
 pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
@@ -449,20 +638,26 @@ pub async fn add_project_asset(
     req: ProjectAssetRequest,
 ) -> AppResult<ProjectAsset> {
     get_project(pool, project_id).await?;
-    get_asset(pool, &req.asset_id, false).await?;
+    let asset = get_asset(pool, &req.asset_id, false).await?;
+    let version_number = req.version_number.unwrap_or(asset.current_version);
+    get_asset_version(pool, &req.asset_id, version_number).await?;
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
         r#"
-        INSERT INTO project_assets(project_id, asset_id, relative_path, added_at)
-        VALUES(?, ?, ?, ?)
+        INSERT INTO project_assets(project_id, asset_id, relative_path, version_number, added_at)
+        VALUES(?, ?, ?, ?, ?)
         ON CONFLICT(project_id, asset_id)
-        DO UPDATE SET relative_path = excluded.relative_path, added_at = excluded.added_at
+        DO UPDATE SET
+            relative_path = excluded.relative_path,
+            version_number = excluded.version_number,
+            added_at = excluded.added_at
         "#,
     )
     .bind(project_id)
     .bind(&req.asset_id)
     .bind(req.relative_path.as_deref())
+    .bind(version_number)
     .bind(&now)
     .execute(pool)
     .await?;
@@ -471,6 +666,7 @@ pub async fn add_project_asset(
         project_id: project_id.to_string(),
         asset_id: req.asset_id,
         relative_path: req.relative_path,
+        version_number,
         added_at: now,
     })
 }
@@ -526,7 +722,17 @@ async fn hydrate(pool: &SqlitePool, row: AssetRow) -> AppResult<Asset> {
     .bind(&row.id)
     .fetch_all(pool)
     .await?;
-    Ok(Asset { row, tags })
+    let current_version: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version_number), 1) FROM asset_versions WHERE asset_id = ?",
+    )
+    .bind(&row.id)
+    .fetch_one(pool)
+    .await?;
+    Ok(Asset {
+        row,
+        tags,
+        current_version,
+    })
 }
 
 async fn replace_tags_tx(
