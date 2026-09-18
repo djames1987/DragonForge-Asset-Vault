@@ -492,3 +492,42 @@ pub struct AuthMeResponse {
     pub username: Option<String>,
     pub role: Option<UserRole>,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AuditEvent {
+    pub id: String,
+    pub occurred_at: String,
+    pub actor_user_id: Option<String>,
+    pub actor_username: Option<String>,
+    pub actor_role: Option<String>,
+    pub workstation: Option<String>,
+    pub action: String,
+    pub method: String,
+    pub path: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub result: String,
+    pub status_code: i64,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuditQuery {
+    pub username: Option<String>,
+    pub action: Option<String>,
+    pub result: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditExportResponse {
+    pub generated_at: String,
+    pub events: Vec<AuditEvent>,
+    pub csv: String,
+}
