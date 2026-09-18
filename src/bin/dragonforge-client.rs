@@ -116,6 +116,24 @@ struct CheckoutStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageTierStatusResponse {
+    asset_id: String,
+    tier: String,
+    archive_enabled: bool,
+    object_count: usize,
+    transitioned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StorageTierMoveResponse {
+    asset_id: String,
+    tier: String,
+    objects_moved: usize,
+    bytes_moved: u64,
+    source_copies_removed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Asset {
     id: String,
     name: String,
@@ -340,6 +358,14 @@ enum ClientEvent {
         asset_id: String,
         result: Result<Option<AssetCheckout>, String>,
     },
+    StorageTierStatus {
+        asset_id: String,
+        result: Result<StorageTierStatusResponse, String>,
+    },
+    StorageTierChanged {
+        asset_id: String,
+        result: Result<StorageTierMoveResponse, String>,
+    },
     Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
     Upload(Result<UploadResponse, String>),
@@ -413,6 +439,7 @@ struct DragonForgeClient {
     show_project_sync: bool,
     checkout_status: HashMap<String, Option<AssetCheckout>>,
     checkout_note: String,
+    storage_tiers: HashMap<String, StorageTierStatusResponse>,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -473,6 +500,7 @@ impl DragonForgeClient {
             show_project_sync: false,
             checkout_status: HashMap::new(),
             checkout_note: String::new(),
+            storage_tiers: HashMap::new(),
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -673,6 +701,74 @@ impl DragonForgeClient {
                     .map_err(|e| e.to_string())
             })();
             let _ = tx.send(ClientEvent::BackupVerified(result));
+        });
+    }
+
+    fn refresh_storage_tier(&mut self, asset_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<StorageTierStatusResponse, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/assets/{asset_id}/storage-tier"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::StorageTierStatus { asset_id, result });
+        });
+    }
+
+    fn archive_selected(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Archiving {}...", asset.name);
+        thread::spawn(move || {
+            let result = (|| -> Result<StorageTierMoveResponse, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/assets/{asset_id}/archive"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::StorageTierChanged { asset_id, result });
+        });
+    }
+
+    fn recall_selected(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Recalling {} to hot storage...", asset.name);
+        thread::spawn(move || {
+            let result = (|| -> Result<StorageTierMoveResponse, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/assets/{asset_id}/recall"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::StorageTierChanged { asset_id, result });
         });
     }
 
@@ -1647,6 +1743,45 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::StorageTierStatus { asset_id, result } => {
+                    match result {
+                        Ok(status) => {
+                            self.storage_tiers.insert(asset_id, status);
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "storage tier status failed");
+                            self.status = format!("Storage tier status failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::StorageTierChanged { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(response) => {
+                            info!(
+                                asset_id = %asset_id,
+                                tier = %response.tier,
+                                objects_moved = response.objects_moved,
+                                bytes_moved = response.bytes_moved,
+                                source_copies_removed = response.source_copies_removed,
+                                "asset storage tier changed"
+                            );
+                            self.status = format!(
+                                "Storage tier: {} · {} objects · {} moved · {} source copies removed",
+                                response.tier,
+                                response.objects_moved,
+                                human_size(response.bytes_moved as i64),
+                                response.source_copies_removed
+                            );
+                            self.refresh_storage_tier(asset_id);
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "storage tier operation failed");
+                            self.status = format!("Storage tier operation failed: {err}");
+                            self.refresh_storage_tier(asset_id);
+                        }
+                    }
+                }
                 ClientEvent::CheckoutStatus { asset_id, result } => {
                     match result {
                         Ok(response) => {
@@ -2319,7 +2454,8 @@ impl DragonForgeClient {
         if let Some(id) = chosen {
             info!(asset_id = %id, "asset selected");
             self.selected_id = Some(id.clone());
-            self.refresh_checkout(id);
+            self.refresh_checkout(id.clone());
+            self.refresh_storage_tier(id);
         }
     }
 
@@ -2441,6 +2577,48 @@ impl DragonForgeClient {
                 ui.label("Checkout status: not loaded");
                 if ui.button("Load Checkout Status").clicked() {
                     self.refresh_checkout(asset.id.clone());
+                }
+            }
+        }
+
+        ui.separator();
+        match self.storage_tiers.get(&asset.id).cloned() {
+            Some(storage_status) => {
+                ui.label(format!(
+                    "Storage Tier: {} · {} object{}",
+                    storage_status.tier.to_ascii_uppercase(),
+                    storage_status.object_count,
+                    if storage_status.object_count == 1 { "" } else { "s" }
+                ));
+                if let Some(at) = storage_status.transitioned_at.as_deref() {
+                    ui.small(format!("Last tier transition: {at}"));
+                }
+                if !storage_status.archive_enabled {
+                    ui.label("Archive tier is not configured on the server.");
+                } else if storage_status.tier == "archive" {
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Recall to Hot Storage"))
+                        .clicked()
+                    {
+                        self.recall_selected();
+                    }
+                } else if ui
+                    .add_enabled(
+                        self.busy_count == 0 && asset.deleted_at.is_none(),
+                        egui::Button::new("Archive Asset"),
+                    )
+                    .clicked()
+                {
+                    self.archive_selected();
+                }
+                if ui.button("Refresh Storage Status").clicked() {
+                    self.refresh_storage_tier(asset.id.clone());
+                }
+            }
+            None => {
+                ui.label("Storage Tier: status not loaded");
+                if ui.button("Load Storage Status").clicked() {
+                    self.refresh_storage_tier(asset.id.clone());
                 }
             }
         }
@@ -2946,7 +3124,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 12.1");
+                ui.label("DragonForge Client Phase 14");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -3420,7 +3598,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 12,
+        phase = 14,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
