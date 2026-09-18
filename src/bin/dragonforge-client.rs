@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
@@ -112,6 +112,15 @@ struct Project {
     description: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectAsset {
+    project_id: String,
+    asset_id: String,
+    relative_path: Option<String>,
+    version_number: i64,
+    added_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +257,11 @@ enum ClientEvent {
         asset_id: String,
         result: Result<PathBuf, String>,
     },
+    ProjectAssetRemoved {
+        project_id: String,
+        asset_id: String,
+        result: Result<String, String>,
+    },
     Versions {
         asset_id: String,
         result: Result<Vec<AssetVersion>, String>,
@@ -292,6 +306,9 @@ struct DragonForgeClient {
     show_upload: bool,
     show_edit: bool,
     show_project_create: bool,
+    show_remove_project_confirm: bool,
+    pending_remove_asset: Option<Asset>,
+    pending_remove_project: Option<Project>,
     show_package_import: bool,
     show_package_contents: bool,
     show_versions: bool,
@@ -341,6 +358,9 @@ impl DragonForgeClient {
             show_upload: false,
             show_edit: false,
             show_project_create: false,
+            show_remove_project_confirm: false,
+            pending_remove_asset: None,
+            pending_remove_project: None,
             show_package_import: false,
             show_package_contents: false,
             show_versions: false,
@@ -821,6 +841,49 @@ impl DragonForgeClient {
         });
     }
 
+    fn request_remove_selected_from_project(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        self.pending_remove_asset = Some(asset);
+        self.pending_remove_project = Some(project);
+        self.show_remove_project_confirm = true;
+    }
+
+    fn confirm_remove_selected_from_project(&mut self) {
+        let Some(asset) = self.pending_remove_asset.take() else {
+            self.show_remove_project_confirm = false;
+            return;
+        };
+        let Some(project) = self.pending_remove_project.take() else {
+            self.show_remove_project_confirm = false;
+            return;
+        };
+
+        self.show_remove_project_confirm = false;
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        let project_id = project.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Removing {} from {}...", asset.name, project.name);
+        info!(asset_id = %asset_id, project_id = %project_id, "remove from project started");
+
+        thread::spawn(move || {
+            let result = remove_asset_from_project(&base, &project, &asset);
+            let _ = tx.send(ClientEvent::ProjectAssetRemoved {
+                project_id,
+                asset_id,
+                result,
+            });
+        });
+    }
+
     fn selected_asset(&self) -> Option<&Asset> {
         let id = self.selected_id.as_deref()?;
         self.assets.iter().find(|a| a.id == id)
@@ -1063,6 +1126,23 @@ impl DragonForgeClient {
                             self.status = format!("Added asset to project: {}", path.display());
                         }
                         Err(err) => self.status = format!("Add to project failed: {err}"),
+                    }
+                }
+                ClientEvent::ProjectAssetRemoved {
+                    project_id,
+                    asset_id,
+                    result,
+                } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(message) => {
+                            info!(project_id = %project_id, asset_id = %asset_id, "asset removed from project");
+                            self.status = message;
+                        }
+                        Err(err) => {
+                            warn!(project_id = %project_id, asset_id = %asset_id, error = %err, "remove from project failed");
+                            self.status = format!("Remove from project failed: {err}");
+                        }
                     }
                 }
                 ClientEvent::Versions { asset_id, result } => {
@@ -1341,6 +1421,17 @@ impl DragonForgeClient {
             {
                 self.add_selected_to_project();
             }
+            if ui
+                .add_enabled(
+                    self.selected_id.is_some()
+                        && self.selected_project_id.is_some()
+                        && !self.deleted_only,
+                    egui::Button::new("Remove Selected from Project"),
+                )
+                .clicked()
+            {
+                self.request_remove_selected_from_project();
+            }
         });
     }
 
@@ -1525,6 +1616,15 @@ impl DragonForgeClient {
                 .clicked()
             {
                 self.add_selected_to_project();
+            }
+            if ui
+                .add_enabled(
+                    self.selected_project_id.is_some(),
+                    egui::Button::new("Remove from Selected Project"),
+                )
+                .clicked()
+            {
+                self.request_remove_selected_from_project();
             }
         }
     }
@@ -1751,6 +1851,48 @@ impl DragonForgeClient {
         self.show_package_contents = open;
     }
 
+    fn remove_project_confirm_window(&mut self, ctx: &egui::Context) {
+        if !self.show_remove_project_confirm {
+            return;
+        }
+
+        let asset_name = self.pending_remove_asset.as_ref()
+            .map(|asset| asset.name.clone())
+            .unwrap_or_else(|| "this asset".to_string());
+        let project_name = self.pending_remove_project.as_ref()
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "the selected project".to_string());
+
+        egui::Window::new("Remove Asset from Project")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Remove '{}' from '{}'?",
+                    asset_name, project_name
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    "DragonForge will remove the exported project copy. For a package, the entire exported package folder will be removed. The vault asset and its revision history will not be deleted."
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Remove from Project"))
+                        .clicked()
+                    {
+                        self.confirm_remove_selected_from_project();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_remove_project_confirm = false;
+                        self.pending_remove_asset = None;
+                        self.pending_remove_project = None;
+                    }
+                });
+            });
+    }
+
     fn project_window(&mut self, ctx: &egui::Context) {
         if !self.show_project_create {
             return;
@@ -1843,7 +1985,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 8");
+                ui.label("DragonForge Client Phase 8.1");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -1855,6 +1997,7 @@ impl eframe::App for DragonForgeClient {
         self.versions_window(ctx);
         self.package_import_window(ctx);
         self.package_contents_window(ctx);
+        self.remove_project_confirm_window(ctx);
     }
 }
 
@@ -2050,6 +2193,158 @@ fn add_asset_to_project(base: &str, project: &Project, asset: &Asset) -> Result<
     let _ = write_project_license_files(base, project)?;
 
     Ok(primary_target.unwrap_or(export_root))
+}
+
+fn remove_asset_from_project(
+    base: &str,
+    project: &Project,
+    asset: &Asset,
+) -> Result<String, String> {
+    let client = DragonForgeClient::api_client()?;
+    let link: ProjectAsset = client
+        .get(format!(
+            "{base}/api/projects/{}/assets/{}",
+            project.id, asset.id
+        ))
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())?;
+
+    let manifest: PackageManifest = client
+        .get(format!(
+            "{base}/api/assets/{}/versions/{}/package",
+            asset.id, link.version_number
+        ))
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())?;
+
+    let relative = link.relative_path.as_deref()
+        .ok_or_else(|| "project asset link does not contain an exported relative path".to_string())?;
+    let primary_target = safe_project_export_path(project, relative)?;
+    let package_mode = manifest.files.len() > 1 || !manifest.referenced_dependencies.is_empty();
+
+    let removal_target = if package_mode {
+        let primary_component_count = Path::new(&manifest.primary_path)
+            .components()
+            .filter(|component| matches!(component, Component::Normal(_)))
+            .count();
+        if primary_component_count == 0 {
+            return Err("package primary path is invalid".to_string());
+        }
+        let mut root = primary_target.clone();
+        for _ in 0..primary_component_count {
+            if !root.pop() {
+                return Err("could not determine exported package root".to_string());
+            }
+        }
+        root
+    } else {
+        primary_target
+    };
+
+    let export_root = PathBuf::from(&project.local_path).join("DragonForgeAssets");
+    if !removal_target.starts_with(&export_root) || removal_target == export_root {
+        return Err("refusing to remove a path outside the project's DragonForgeAssets folder".to_string());
+    }
+
+    let existed = removal_target.exists();
+    let staging = if existed {
+        let parent = removal_target.parent()
+            .ok_or_else(|| "exported asset path has no parent folder".to_string())?;
+        let staged = parent.join(format!(
+            ".dragonforge-remove-{}-{}",
+            asset.id,
+            chrono::Utc::now().timestamp_millis()
+        ));
+        fs::rename(&removal_target, &staged).map_err(|e| {
+            format!("could not stage exported project copy for removal: {e}")
+        })?;
+        Some(staged)
+    } else {
+        None
+    };
+
+    let unlink_result = client
+        .delete(format!(
+            "{base}/api/projects/{}/assets/{}",
+            project.id, asset.id
+        ))
+        .send()
+        .map_err(|e| e.to_string())
+        .and_then(|response| response.error_for_status().map_err(|e| e.to_string()));
+
+    if let Err(err) = unlink_result {
+        if let Some(staged) = &staging {
+            let _ = fs::rename(staged, &removal_target);
+        }
+        return Err(format!("server unlink failed; project files were restored: {err}"));
+    }
+
+    if let Some(staged) = staging {
+        let cleanup = if staged.is_dir() {
+            fs::remove_dir_all(&staged)
+        } else {
+            fs::remove_file(&staged)
+        };
+        if let Err(err) = cleanup {
+            return Err(format!(
+                "project link was removed, but staged files could not be deleted at {}: {err}",
+                staged.display()
+            ));
+        }
+    }
+
+    let credits_note = match write_project_license_files(base, project) {
+        Ok(_) => String::new(),
+        Err(err) => format!(" License files could not be refreshed automatically: {err}"),
+    };
+
+    Ok(if existed {
+        format!(
+            "Removed {} from {} and deleted {}.{}",
+            asset.name,
+            project.name,
+            removal_target.display(),
+            credits_note
+        )
+    } else {
+        format!(
+            "Removed {} from {}. The exported project copy was already missing.{}",
+            asset.name,
+            project.name,
+            credits_note
+        )
+    })
+}
+
+fn safe_project_export_path(project: &Project, relative: &str) -> Result<PathBuf, String> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute() {
+        return Err("project asset path must be relative".to_string());
+    }
+
+    let mut clean = PathBuf::new();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("project asset path contains an unsafe component".to_string())
+            }
+        }
+    }
+
+    if clean.as_os_str().is_empty() {
+        return Err("project asset path is empty".to_string());
+    }
+
+    let target = PathBuf::from(&project.local_path).join(clean);
+    let export_root = PathBuf::from(&project.local_path).join("DragonForgeAssets");
+    if !target.starts_with(&export_root) {
+        return Err("project asset path is outside DragonForgeAssets".to_string());
+    }
+    Ok(target)
 }
 
 fn write_project_license_files(
