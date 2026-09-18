@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub semantic: SemanticConfig,
     #[serde(default)]
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +52,16 @@ pub struct BackupConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bootstrap_admin_user: Option<String>,
+    #[serde(default)]
+    pub bootstrap_admin_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct SemanticConfig {
     #[serde(default = "default_semantic_enabled")]
     pub enabled: bool,
@@ -73,6 +85,7 @@ impl Default for AppConfig {
             database: DatabaseConfig::default(),
             semantic: SemanticConfig::default(),
             backup: BackupConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -154,3 +167,14 @@ impl Default for BackupConfig {
 
 fn default_backup_dir() -> PathBuf { PathBuf::from("./backups") }
 fn default_backup_keep() -> usize { 10 }
+
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bootstrap_admin_user: None,
+            bootstrap_admin_token: None,
+        }
+    }
+}
