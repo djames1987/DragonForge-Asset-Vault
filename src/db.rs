@@ -4,7 +4,8 @@ use crate::{
     models::{
         Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetRequest,
-        SemanticEmbeddingRow, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
+        SemanticEmbeddingRow, StatsResponse, StorageObjectRef, UpdateAssetRequest,
+        UpdateProjectRequest,
     },
 };
 use sqlx::{
@@ -113,6 +114,14 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
             dependency_path TEXT NOT NULL,
             missing INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(asset_id, version_number, dependency_path),
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS asset_storage_tiers (
+            asset_id TEXT PRIMARY KEY NOT NULL,
+            tier TEXT NOT NULL CHECK(tier IN ('hot', 'archive')),
+            transitioned_at TEXT NOT NULL,
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
         )
         "#,
@@ -292,6 +301,129 @@ pub async fn list_assets(pool: &SqlitePool, query: &AssetQuery) -> AppResult<Vec
         assets.push(hydrate(pool, row).await?);
     }
     Ok(assets)
+}
+
+pub async fn list_asset_storage_objects(
+    pool: &SqlitePool,
+    asset_id: &str,
+) -> AppResult<Vec<StorageObjectRef>> {
+    get_asset(pool, asset_id, true).await?;
+    let rows = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT storage_path, sha256 FROM assets WHERE id = ?
+        UNION
+        SELECT storage_path, sha256 FROM asset_versions WHERE asset_id = ?
+        UNION
+        SELECT storage_path, sha256 FROM package_files WHERE asset_id = ?
+        "#,
+    )
+    .bind(asset_id)
+    .bind(asset_id)
+    .bind(asset_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(storage_path, sha256)| StorageObjectRef { storage_path, sha256 })
+        .collect())
+}
+
+pub async fn replace_asset_storage_paths(
+    pool: &SqlitePool,
+    asset_id: &str,
+    mappings: &[(String, String)],
+    tier: &str,
+) -> AppResult<String> {
+    if tier != "hot" && tier != "archive" {
+        return Err(AppError::BadRequest("invalid storage tier".to_string()));
+    }
+    get_asset(pool, asset_id, true).await?;
+    let transitioned_at = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+
+    for (old, new) in mappings {
+        sqlx::query("UPDATE assets SET storage_path = ? WHERE id = ? AND storage_path = ?")
+            .bind(new)
+            .bind(asset_id)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE asset_versions SET storage_path = ? WHERE asset_id = ? AND storage_path = ?")
+            .bind(new)
+            .bind(asset_id)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE package_files SET storage_path = ? WHERE asset_id = ? AND storage_path = ?")
+            .bind(new)
+            .bind(asset_id)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO asset_storage_tiers(asset_id, tier, transitioned_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(asset_id)
+        DO UPDATE SET tier = excluded.tier, transitioned_at = excluded.transitioned_at
+        "#,
+    )
+    .bind(asset_id)
+    .bind(tier)
+    .bind(&transitioned_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(transitioned_at)
+}
+
+pub async fn get_asset_storage_tier(
+    pool: &SqlitePool,
+    asset_id: &str,
+) -> AppResult<(String, Option<String>)> {
+    get_asset(pool, asset_id, true).await?;
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT tier, transitioned_at FROM asset_storage_tiers WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((tier, transitioned_at)) = row {
+        return Ok((tier, Some(transitioned_at)));
+    }
+
+    let current: String = sqlx::query_scalar("SELECT storage_path FROM assets WHERE id = ?")
+        .bind(asset_id)
+        .fetch_one(pool)
+        .await?;
+    Ok((
+        if current.starts_with("archive://") { "archive" } else { "hot" }.to_string(),
+        None,
+    ))
+}
+
+pub async fn count_storage_path_references(
+    pool: &SqlitePool,
+    storage_path: &str,
+) -> AppResult<i64> {
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM assets WHERE storage_path = ?) +
+            (SELECT COUNT(*) FROM asset_versions WHERE storage_path = ?) +
+            (SELECT COUNT(*) FROM package_files WHERE storage_path = ?)
+        "#,
+    )
+    .bind(storage_path)
+    .bind(storage_path)
+    .bind(storage_path)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 pub async fn get_asset_checkout(
