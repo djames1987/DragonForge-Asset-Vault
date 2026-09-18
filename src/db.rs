@@ -4,8 +4,9 @@ use crate::{
     models::{
         Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetRequest,
-        CreateUserRequest, SemanticEmbeddingRow, StatsResponse, StorageObjectRef,
-        UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole, VaultUser,
+        AuditEvent, AuditQuery, CreateUserRequest, SemanticEmbeddingRow, StatsResponse,
+        StorageObjectRef, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole,
+        VaultUser,
     },
 };
 use sqlx::{
@@ -118,6 +119,24 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            occurred_at TEXT NOT NULL,
+            actor_user_id TEXT,
+            actor_username TEXT,
+            actor_role TEXT,
+            workstation TEXT,
+            action TEXT NOT NULL,
+            method TEXT NOT NULL,
+            path TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            result TEXT NOT NULL,
+            status_code INTEGER NOT NULL,
+            detail TEXT
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS vault_users (
             id TEXT PRIMARY KEY NOT NULL,
             username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -191,6 +210,11 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_asset_checkouts_holder ON asset_checkouts(holder, workstation)",
         "CREATE INDEX IF NOT EXISTS idx_vault_users_username ON vault_users(username)",
         "CREATE INDEX IF NOT EXISTS idx_vault_users_token_hash ON vault_users(token_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_occurred_at ON audit_events(occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor_username, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_events(target_type, target_id, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_result ON audit_events(result, occurred_at DESC)",
     ];
 
     for statement in STATEMENTS {
@@ -230,6 +254,79 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+pub async fn insert_audit_event(
+    pool: &SqlitePool,
+    event: &AuditEvent,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_events(
+            id, occurred_at, actor_user_id, actor_username, actor_role, workstation,
+            action, method, path, target_type, target_id, result, status_code, detail
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&event.id)
+    .bind(&event.occurred_at)
+    .bind(&event.actor_user_id)
+    .bind(&event.actor_username)
+    .bind(&event.actor_role)
+    .bind(&event.workstation)
+    .bind(&event.action)
+    .bind(&event.method)
+    .bind(&event.path)
+    .bind(&event.target_type)
+    .bind(&event.target_id)
+    .bind(&event.result)
+    .bind(event.status_code)
+    .bind(&event.detail)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_audit_events(
+    pool: &SqlitePool,
+    query: &AuditQuery,
+) -> AppResult<Vec<AuditEvent>> {
+    let username = query.username.as_ref().map(|v| v.trim().to_string());
+    let action = query.action.as_ref().map(|v| format!("%{}%", v.trim()));
+    let result = query.result.as_ref().map(|v| v.trim().to_string());
+    let target_type = query.target_type.as_ref().map(|v| v.trim().to_string());
+    let target_id = query.target_id.as_ref().map(|v| v.trim().to_string());
+    let from = query.from.as_ref().map(|v| v.trim().to_string());
+    let to = query.to.as_ref().map(|v| v.trim().to_string());
+    let limit = query.limit.unwrap_or(250).clamp(1, 2000);
+    let offset = query.offset.unwrap_or(0).max(0);
+
+    Ok(sqlx::query_as::<_, AuditEvent>(
+        r#"
+        SELECT *
+        FROM audit_events
+        WHERE (? IS NULL OR actor_username = ? COLLATE NOCASE)
+          AND (? IS NULL OR action LIKE ?)
+          AND (? IS NULL OR result = ? COLLATE NOCASE)
+          AND (? IS NULL OR target_type = ? COLLATE NOCASE)
+          AND (? IS NULL OR target_id = ?)
+          AND (? IS NULL OR occurred_at >= ?)
+          AND (? IS NULL OR occurred_at <= ?)
+        ORDER BY occurred_at DESC
+        LIMIT ? OFFSET ?
+        "#,
+    )
+    .bind(username.as_deref()).bind(username.as_deref())
+    .bind(action.as_deref()).bind(action.as_deref())
+    .bind(result.as_deref()).bind(result.as_deref())
+    .bind(target_type.as_deref()).bind(target_type.as_deref())
+    .bind(target_id.as_deref()).bind(target_id.as_deref())
+    .bind(from.as_deref()).bind(from.as_deref())
+    .bind(to.as_deref()).bind(to.as_deref())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn list_users(pool: &SqlitePool) -> AppResult<Vec<VaultUser>> {
