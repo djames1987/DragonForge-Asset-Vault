@@ -1,4 +1,5 @@
 use crate::{
+    engine,
     error::{AppError, AppResult},
     models::{
         Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, PackageFile, Project,
@@ -943,11 +944,13 @@ pub async fn create_project(
 
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let engine = req
-        .engine
-        .unwrap_or_else(|| "Generic".to_string())
-        .trim()
-        .to_string();
+    let requested_engine = req.engine.unwrap_or_else(|| "Generic".to_string());
+    let engine = engine::require(if requested_engine.trim().is_empty() {
+        "Generic"
+    } else {
+        requested_engine.trim()
+    })?
+    .id;
 
     sqlx::query(
         r#"
@@ -957,7 +960,7 @@ pub async fn create_project(
     )
     .bind(&id)
     .bind(req.name.trim())
-    .bind(if engine.is_empty() { "Generic" } else { &engine })
+    .bind(engine)
     .bind(req.local_path.trim())
     .bind(req.description.as_deref())
     .bind(&now)
@@ -975,7 +978,8 @@ pub async fn update_project(
 ) -> AppResult<Project> {
     let current = get_project(pool, id).await?;
     let name = req.name.unwrap_or(current.name);
-    let engine = req.engine.unwrap_or(current.engine);
+    let requested_engine = req.engine.unwrap_or(current.engine);
+    let engine = engine::require(requested_engine.trim())?.id.to_string();
     let local_path = req.local_path.unwrap_or(current.local_path);
     let description = req.description.or(current.description);
 
