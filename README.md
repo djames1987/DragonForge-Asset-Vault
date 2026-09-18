@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 15 — Audit Trail, Activity History & Administrative Oversight**
+**Phase 16 — Modern Desktop UI/UX Overhaul**
 
 ### Server
 
@@ -75,8 +75,12 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - Activity window and per-asset activity shortcut
 - Administrator JSON + CSV activity export
 - role-aware disabled mutation controls for Read-only users
+- modern sidebar navigation and dedicated application views
+- responsive asset-card grid and collapsible Inspector
+- dedicated Projects, Activity, Backups, AI Search, Users, and Settings pages
+- persistent theme, UI scale, card size, and layout preferences
 
-See `docs/PHASE_1.md` through `docs/PHASE_15.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_16.md`.
 
 ## Quick start
 
@@ -276,3 +280,31 @@ The desktop **Activity** window supports filtering by user, action, result, targ
 Non-Administrator users can inspect their own activity. Administrators can inspect vault-wide activity.
 
 Read-only users now see mutating desktop controls disabled instead of being invited to click operations that the server will reject with HTTP 403. Server-side authorization remains authoritative.
+
+
+## Phase 16 modern desktop UI
+
+Phase 16 reorganizes the native desktop client around a modern three-region shell:
+
+```text
+Navigation sidebar | Main workspace | Contextual Inspector
+```
+
+The sidebar now separates Library, Workspace, and System destinations instead of keeping every control in the top toolbar.
+
+Dedicated views:
+
+```text
+Assets
+Recycle Bin
+Projects
+Activity
+Backups
+AI Search
+Users (Administrator)
+Settings
+```
+
+The Asset Library now uses an adaptive card grid that responds to available width and a redesigned Inspector with collapsible General, Collaboration, Versions & Package, Project, Storage, and Actions sections.
+
+Appearance/layout preferences are persisted in the existing client settings JSON, including dark/light mode, UI scale, asset card width, sidebar width, inspector width, filter visibility, and last active view.
