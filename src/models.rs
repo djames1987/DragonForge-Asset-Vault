@@ -254,3 +254,57 @@ pub struct ProjectLicenseReport {
     pub credits_text: String,
     pub csv_manifest: String,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticStatusResponse {
+    pub enabled: bool,
+    pub ollama_reachable: bool,
+    pub model: String,
+    pub indexed_assets: i64,
+    pub total_active_assets: i64,
+    pub stale_assets: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticSearchResult {
+    pub asset: Asset,
+    pub semantic_score: f32,
+    pub keyword_score: f32,
+    pub combined_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticSearchResponse {
+    pub query: String,
+    pub mode: String,
+    pub model: String,
+    pub indexed_assets: i64,
+    pub results: Vec<SemanticSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReindexResponse {
+    pub requested: usize,
+    pub indexed: usize,
+    pub failed: usize,
+    pub model: String,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SemanticSearchQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct SemanticEmbeddingRow {
+    pub asset_id: String,
+    pub model: String,
+    pub document_hash: String,
+    pub dimensions: i64,
+    pub embedding_json: String,
+    pub indexed_at: String,
+}
