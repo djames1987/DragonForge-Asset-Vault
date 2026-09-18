@@ -1,3 +1,4 @@
+use base64::Engine;
 use crate::{
     error::{AppError, AppResult},
     models::AssetRow,
@@ -21,7 +22,7 @@ pub fn is_previewable_image(extension: Option<&str>) -> bool {
 pub fn is_previewable_model(extension: Option<&str>) -> bool {
     matches!(
         extension.map(|v| v.to_ascii_lowercase()).as_deref(),
-        Some("obj")
+        Some("obj") | Some("glb") | Some("gltf")
     )
 }
 
@@ -78,6 +79,7 @@ fn generate_preview(source: &Path, destination: &Path, extension: &str) -> AppRe
     match extension.to_ascii_lowercase().as_str() {
         "jpg" | "jpeg" | "png" | "webp" => generate_image_preview(source, destination),
         "obj" => generate_obj_preview(source, destination),
+        "glb" | "gltf" => generate_gltf_preview(source, destination),
         _ => Err(AppError::BadRequest(
             "preview requested for unsupported asset type".to_string(),
         )),
@@ -99,21 +101,6 @@ fn generate_image_preview(source: &Path, destination: &Path) -> AppResult<()> {
             ))
         })?;
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct ViewVertex {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-struct Triangle {
-    a: ViewVertex,
-    b: ViewVertex,
-    c: ViewVertex,
-    depth: f32,
-    shade: u8,
 }
 
 fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
@@ -147,15 +134,120 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
         }
     }
 
+    render_geometry(&positions, &triangles, destination)
+}
+
+fn generate_gltf_preview(source: &Path, destination: &Path) -> AppResult<()> {
+    let bytes = std::fs::read(source)?;
+    let gltf = gltf::Gltf::from_slice(&bytes).map_err(|err| {
+        AppError::Other(anyhow::anyhow!("failed to parse glTF/GLB for preview: {err}"))
+    })?;
+
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    for buffer in gltf.buffers() {
+        let data = match buffer.source() {
+            gltf::buffer::Source::Bin => gltf
+                .blob
+                .clone()
+                .ok_or_else(|| AppError::BadRequest("GLB is missing its binary buffer".to_string()))?,
+            gltf::buffer::Source::Uri(uri) => decode_gltf_uri(uri)?,
+        };
+        buffers.push(data);
+    }
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut triangles: Vec<[usize; 3]> = Vec::new();
+
+    for mesh in gltf.meshes() {
+        for primitive in mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                continue;
+            }
+
+            let reader = primitive.reader(|buffer| {
+                buffers.get(buffer.index()).map(|data| data.as_slice())
+            });
+
+            let Some(read_positions) = reader.read_positions() else {
+                continue;
+            };
+
+            let base = positions.len();
+            let local_positions = read_positions.collect::<Vec<_>>();
+            positions.extend(local_positions.iter().copied());
+
+            if let Some(indices) = reader.read_indices() {
+                let indices = indices.into_u32().collect::<Vec<_>>();
+                for face in indices.chunks_exact(3) {
+                    triangles.push([
+                        base + face[0] as usize,
+                        base + face[1] as usize,
+                        base + face[2] as usize,
+                    ]);
+                }
+            } else {
+                for face in (0..local_positions.len()).collect::<Vec<_>>().chunks_exact(3) {
+                    triangles.push([base + face[0], base + face[1], base + face[2]]);
+                }
+            }
+        }
+    }
+
+    render_geometry(&positions, &triangles, destination)
+}
+
+fn decode_gltf_uri(uri: &str) -> AppResult<Vec<u8>> {
+    if !uri.starts_with("data:") {
+        return Err(AppError::BadRequest(
+            "external glTF buffer files are not yet supported; use GLB or embedded-buffer glTF"
+                .to_string(),
+        ));
+    }
+
+    let Some((metadata, payload)) = uri.split_once(',') else {
+        return Err(AppError::BadRequest("invalid glTF data URI".to_string()));
+    };
+
+    if !metadata.ends_with(";base64") {
+        return Err(AppError::BadRequest(
+            "only base64-embedded glTF buffers are supported".to_string(),
+        ));
+    }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|err| AppError::BadRequest(format!("invalid embedded glTF buffer: {err}")))
+}
+
+#[derive(Clone, Copy)]
+struct ViewVertex {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+struct Triangle {
+    a: ViewVertex,
+    b: ViewVertex,
+    c: ViewVertex,
+    depth: f32,
+    shade: u8,
+}
+
+fn render_geometry(
+    positions: &[[f32; 3]],
+    triangles: &[[usize; 3]],
+    destination: &Path,
+) -> AppResult<()> {
     if positions.is_empty() || triangles.is_empty() {
         return Err(AppError::BadRequest(
-            "OBJ has no renderable triangle geometry".to_string(),
+            "asset has no renderable triangle geometry".to_string(),
         ));
     }
 
     let mut min_bound = [f32::INFINITY; 3];
     let mut max_bound = [f32::NEG_INFINITY; 3];
-    for p in &positions {
+    for p in positions {
         for axis in 0..3 {
             min_bound[axis] = min_bound[axis].min(p[axis]);
             max_bound[axis] = max_bound[axis].max(p[axis]);
@@ -203,6 +295,13 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
 
     let mut render_triangles = Vec::with_capacity(triangles.len());
     for face in triangles {
+        if face[0] >= transformed.len()
+            || face[1] >= transformed.len()
+            || face[2] >= transformed.len()
+        {
+            continue;
+        }
+
         let a = transformed[face[0]];
         let b = transformed[face[1]];
         let c = transformed[face[2]];
@@ -220,7 +319,8 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
         let len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.0001);
         let facing = (nz / len).abs();
         let light = ((ny / len) * -0.35 + (nz / len) * 0.65).abs();
-        let shade = (105.0 + 120.0 * (0.4 * facing + 0.6 * light)).clamp(85.0, 225.0) as u8;
+        let shade =
+            (105.0 + 120.0 * (0.4 * facing + 0.6 * light)).clamp(85.0, 225.0) as u8;
 
         render_triangles.push(Triangle {
             a,
@@ -229,6 +329,12 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
             depth: (a.z + b.z + c.z) / 3.0,
             shade,
         });
+    }
+
+    if render_triangles.is_empty() {
+        return Err(AppError::BadRequest(
+            "asset contains no valid renderable triangles".to_string(),
+        ));
     }
 
     render_triangles.sort_by(|lhs, rhs| {
@@ -254,7 +360,12 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
             pa,
             pb,
             pc,
-            Rgba([tri.shade, tri.shade, tri.shade.saturating_add(8), 255]),
+            Rgba([
+                tri.shade,
+                tri.shade,
+                tri.shade.saturating_add(8),
+                255,
+            ]),
         );
         draw_line(&mut canvas, pa, pb, Rgba([45, 48, 55, 255]));
         draw_line(&mut canvas, pb, pc, Rgba([45, 48, 55, 255]));
@@ -265,17 +376,15 @@ fn generate_obj_preview(source: &Path, destination: &Path) -> AppResult<()> {
         .save_with_format(destination, image::ImageFormat::Png)
         .map_err(|err| {
             AppError::Other(anyhow::anyhow!(
-                "failed to save OBJ preview: {err}"
+                "failed to save 3D preview: {err}"
             ))
         })?;
+
     Ok(())
 }
 
 fn project(v: ViewVertex, cx: f32, cy: f32, scale: f32) -> (i32, i32) {
-    (
-        (cx + v.x * scale) as i32,
-        (cy - v.y * scale) as i32,
-    )
+    ((cx + v.x * scale) as i32, (cy - v.y * scale) as i32)
 }
 
 fn edge(a: (i32, i32), b: (i32, i32), p: (i32, i32)) -> i64 {
