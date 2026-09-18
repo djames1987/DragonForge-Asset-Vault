@@ -1594,7 +1594,7 @@ pub async fn list_project_asset_counts(
 ) -> AppResult<Vec<ProjectAssetCount>> {
     Ok(sqlx::query_as::<_, ProjectAssetCount>(
         r#"
-        SELECT p.id AS project_id, COUNT(pa.asset_id) AS asset_count
+        SELECT p.id AS project_id, COUNT(a.id) AS asset_count
         FROM projects p
         LEFT JOIN project_assets pa ON pa.project_id = p.id
         LEFT JOIN assets a ON a.id = pa.asset_id AND a.deleted_at IS NULL
