@@ -1,10 +1,11 @@
 use base64::Engine;
 use crate::{
     error::{AppError, AppResult},
-    models::AssetRow,
+    models::{AssetRow, PackageFile},
     storage::Storage,
 };
 use image::{ImageBuffer, Rgba};
+use sha2::{Digest, Sha256};
 use std::{
     cmp::{max, min},
     path::{Path, PathBuf},
@@ -67,6 +68,68 @@ pub async fn get_or_create_preview(
         extension = %extension,
         preview = %destination.display(),
         "asset preview generated"
+    );
+
+    Ok(Some(destination))
+}
+
+pub async fn get_or_create_package_preview(
+    storage: &Storage,
+    asset: &AssetRow,
+    version_number: i64,
+    files: &[PackageFile],
+) -> AppResult<Option<PathBuf>> {
+    if files.is_empty() {
+        return get_or_create_preview(storage, asset).await;
+    }
+    if !is_previewable_asset(asset.extension.as_deref()) {
+        return Ok(None);
+    }
+
+    let cache_key = hex::encode(Sha256::digest(format!("{}:{version_number}", asset.id).as_bytes()));
+    let destination = storage.thumbnail_path(&cache_key);
+    if tokio::fs::try_exists(&destination).await? {
+        return Ok(Some(destination));
+    }
+
+    let workspace = storage.temp_directory();
+    tokio::fs::create_dir_all(&workspace).await?;
+    let mut primary_path = None;
+
+    for file in files {
+        let target = workspace.join(&file.relative_path);
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let source = storage.resolve_relative(&file.storage_path)?;
+        tokio::fs::copy(&source, &target).await?;
+        if file.is_primary {
+            primary_path = Some(target);
+        }
+    }
+
+    let source = primary_path.ok_or_else(|| {
+        AppError::BadRequest("package does not have a primary file".to_string())
+    })?;
+    let destination_for_worker = destination.clone();
+    let extension = asset.extension.clone().unwrap_or_default();
+    let extension_for_worker = extension.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        generate_preview(&source, &destination_for_worker, &extension_for_worker)
+    })
+    .await
+    .map_err(|err| AppError::Other(anyhow::anyhow!("package preview worker failed: {err}")))?;
+
+    let _ = tokio::fs::remove_dir_all(&workspace).await;
+    result?;
+
+    tracing::info!(
+        asset_id = %asset.id,
+        version = version_number,
+        extension = %extension,
+        preview = %destination.display(),
+        "package preview generated"
     );
 
     Ok(Some(destination))
@@ -151,7 +214,18 @@ fn generate_gltf_preview(source: &Path, destination: &Path) -> AppResult<()> {
                 .blob
                 .clone()
                 .ok_or_else(|| AppError::BadRequest("GLB is missing its binary buffer".to_string()))?,
-            gltf::buffer::Source::Uri(uri) => decode_gltf_uri(uri)?,
+            gltf::buffer::Source::Uri(uri) => {
+                if uri.starts_with("data:") {
+                    decode_gltf_uri(uri)?
+                } else {
+                    let parent = source.parent().unwrap_or_else(|| Path::new(""));
+                    std::fs::read(parent.join(uri)).map_err(|err| {
+                        AppError::BadRequest(format!(
+                            "failed to read external glTF buffer '{uri}': {err}"
+                        ))
+                    })?
+                }
+            },
         };
         buffers.push(data);
     }
@@ -198,13 +272,6 @@ fn generate_gltf_preview(source: &Path, destination: &Path) -> AppResult<()> {
 }
 
 fn decode_gltf_uri(uri: &str) -> AppResult<Vec<u8>> {
-    if !uri.starts_with("data:") {
-        return Err(AppError::BadRequest(
-            "external glTF buffer files are not yet supported; use GLB or embedded-buffer glTF"
-                .to_string(),
-        ));
-    }
-
     let Some((metadata, payload)) = uri.split_once(',') else {
         return Err(AppError::BadRequest("invalid glTF data URI".to_string()));
     };
