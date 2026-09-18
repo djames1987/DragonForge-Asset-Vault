@@ -42,6 +42,7 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         )
         .route("/api/assets/:id/download", get(download_asset))
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
+        .route("/api/assets/:id/preview", get(asset_preview))
         .route("/api/assets/:id/restore", axum::routing::post(restore_asset))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -67,7 +68,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 4,
+        phase: 5,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -238,12 +239,13 @@ async fn upload_asset(
         "asset stored and cataloged"
     );
 
-    if thumbnail::is_previewable_image(asset.row.extension.as_deref()) {
-        if let Err(err) = thumbnail::get_or_create_thumbnail(&state.storage, &asset.row).await {
+    if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await {
             warn!(
                 asset_id = %asset.row.id,
+                extension = ?asset.row.extension,
                 error = %err,
-                "asset stored but thumbnail generation failed"
+                "asset stored but preview generation failed"
             );
         }
     }
@@ -340,22 +342,42 @@ async fn asset_thumbnail(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
-    info!(asset_id = %id, "thumbnail requested");
+    info!(asset_id = %id, "legacy thumbnail route requested");
     let asset = db::get_asset(&state.db, &id, false).await?;
-    let Some(path) = thumbnail::get_or_create_thumbnail(&state.storage, &asset.row).await? else {
-        info!(asset_id = %id, "thumbnail unavailable for non-image asset");
+    let Some(path) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await? else {
+        return Err(AppError::NotFound);
+    };
+    serve_preview_file(&id, &path, "legacy thumbnail served").await
+}
+
+async fn asset_preview(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    info!(asset_id = %id, "preview requested");
+    let asset = db::get_asset(&state.db, &id, false).await?;
+    let Some(path) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await? else {
+        info!(
+            asset_id = %id,
+            extension = ?asset.row.extension,
+            "preview unavailable for unsupported asset type"
+        );
         return Err(AppError::NotFound);
     };
 
-    let metadata = tokio::fs::metadata(&path).await?;
-    let file = File::open(&path).await?;
+    serve_preview_file(&id, &path, "preview served").await
+}
+
+async fn serve_preview_file(id: &str, path: &std::path::Path, event: &str) -> AppResult<Response> {
+    let metadata = tokio::fs::metadata(path).await?;
+    let file = File::open(path).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
     headers.insert(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&metadata.len().to_string())
-            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid thumbnail content length")))?,
+            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid preview content length")))?,
     );
     headers.insert(
         header::CACHE_CONTROL,
@@ -366,7 +388,7 @@ async fn asset_thumbnail(
         asset_id = %id,
         path = %path.display(),
         byte_size = metadata.len(),
-        "thumbnail served"
+        "{event}"
     );
 
     let stream = ReaderStream::new(file);
