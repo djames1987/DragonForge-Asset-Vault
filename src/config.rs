@@ -29,6 +29,8 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub archive_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,7 +89,7 @@ impl Default for ServerConfig {
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { data_dir: default_data_dir() }
+        Self { data_dir: default_data_dir(), archive_dir: None }
     }
 }
 
