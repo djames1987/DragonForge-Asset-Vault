@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 10 — Verified Backup & Replication**
+**Phase 11 — Engine Integrations & Project Sync**
 
 ### Server
 
@@ -29,6 +29,8 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - hybrid semantic + keyword search with offline fallback
 - verified vault snapshots with SHA-256 manifests
 - configurable retention and replication targets
+- engine-aware project export presets for Godot, Unity, Unreal, Roblox/Rojo, Minecraft Bedrock, and Generic projects
+- project drift detection, pinned-file repair, and explicit update-to-latest workflows
 
 ### Desktop client
 
@@ -49,9 +51,11 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - Smart / Keyword search modes
 - AI index status and one-click reindex
 - one-click Create Backup / Verify Latest controls
+- engine-specific project destinations
+- Check Project Sync / Repair Pinned Files / Update Project to Latest controls
 - persistent daily logs
 
-See `docs/PHASE_1.md` through `docs/PHASE_10.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_11.md`.
 
 ## Quick start
 
@@ -145,3 +149,21 @@ replication_targets = ["D:/DragonForge-Backup"]
 ```
 
 The backup directory must be outside the live DragonForge data directory.
+
+
+## Phase 11 engine-aware project workflow
+
+Project engine presets now determine the default DragonForge export folder:
+
+| Engine | Export destination |
+| --- | --- |
+| Generic | `DragonForgeAssets` |
+| Godot | `assets/dragonforge` |
+| Unity | `Assets/DragonForge` |
+| Unreal Engine | `Content/DragonForge` |
+| Roblox / Rojo | `src/DragonForgeAssets` |
+| Minecraft Bedrock | `DragonForgeAssets` |
+
+Existing pre-Phase-11 project links under `DragonForgeAssets` remain supported.
+
+Use **Check Project Sync** to verify exported files against the vault using SHA-256. **Repair Pinned Files** restores the exact versions already pinned to the project without upgrading them. **Update Project to Latest** is the explicit action that advances project pins to the current vault revisions.
