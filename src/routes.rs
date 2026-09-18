@@ -12,8 +12,9 @@ use crate::{
         AssetQuery, AssetRow, AuditExportResponse, AuditQuery, AuthMeResponse, BackupCreateResponse, BackupStatusResponse,
         BackupVerifyResponse, CheckoutRequest, CheckoutStatusResponse, CreateProjectRequest,
         CreateUserRequest, DeleteResponse, EnginePreset, HealthResponse, ProjectExportPlan,
-        PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
-        ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
+        PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetBrowserEntry,
+        ProjectAssetRequest, ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse,
+        RestoreVersionRequest,
         SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, StorageTierMoveResponse,
         StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest,
         UploadMetadata, UploadResponse, VaultUser,
@@ -115,6 +116,10 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route(
             "/api/projects/:id/assets",
             get(list_project_assets).post(add_project_asset),
+        )
+        .route(
+            "/api/projects/:id/asset-browser",
+            get(list_project_asset_browser),
         )
         .route("/api/projects/:id/license-report", get(project_license_report))
         .route(
@@ -1607,6 +1612,15 @@ async fn delete_project(
     db::delete_project(&state.db, &id).await?;
     info!(project_id = %id, "project deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_project_asset_browser(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<ProjectAssetBrowserEntry>>> {
+    let entries = db::list_project_asset_browser(&state.db, &id).await?;
+    info!(project_id = %id, count = entries.len(), "project asset browser requested");
+    Ok(Json(entries))
 }
 
 async fn list_project_assets(
