@@ -3,8 +3,8 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, CreateProjectRequest, DeleteResponse, HealthResponse,
-        ProjectAssetRequest, RestoreResponse, UpdateAssetRequest, UpdateProjectRequest,
-        UploadMetadata, UploadResponse,
+        ProjectAssetRequest, RestoreResponse, RestoreVersionRequest, UpdateAssetRequest,
+        UpdateProjectRequest, UploadMetadata, UploadResponse,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
@@ -44,6 +44,18 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
         .route("/api/assets/:id/preview", get(asset_preview))
         .route("/api/assets/:id/restore", axum::routing::post(restore_asset))
+        .route(
+            "/api/assets/:id/versions",
+            get(list_asset_versions).post(upload_asset_version),
+        )
+        .route(
+            "/api/assets/:id/versions/:version/download",
+            get(download_asset_version),
+        )
+        .route(
+            "/api/assets/:id/versions/:version/restore",
+            axum::routing::post(restore_asset_version),
+        )
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
             "/api/projects/:id",
@@ -68,7 +80,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 5,
+        phase: 6,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -393,6 +405,162 @@ async fn serve_preview_file(id: &str, path: &std::path::Path, event: &str) -> Ap
 
     let stream = ReaderStream::new(file);
     Ok((headers, Body::from_stream(stream)).into_response())
+}
+
+async fn list_asset_versions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    info!(asset_id = %id, "asset version history requested");
+    let versions = db::list_asset_versions(&state.db, &id).await?;
+    info!(asset_id = %id, count = versions.len(), "asset version history returned");
+    Ok(Json(versions))
+}
+
+async fn upload_asset_version(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> AppResult<impl IntoResponse> {
+    let current = db::get_asset(&state.db, &id, false).await?;
+    info!(asset_id = %id, current_version = current.current_version, "new asset version upload requested");
+
+    let mut incoming: Option<IncomingFile> = None;
+    let mut note: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await? {
+        match field.name().unwrap_or_default() {
+            "file" => {
+                if incoming.is_some() {
+                    return Err(AppError::BadRequest(
+                        "only one file may be uploaded per version".to_string(),
+                    ));
+                }
+                incoming = Some(storage::stream_field_to_temp(&state.storage, field).await?);
+            }
+            "note" => note = clean_optional(field.text().await?),
+            _ => {}
+        }
+    }
+
+    let incoming = incoming.ok_or_else(|| {
+        AppError::BadRequest("multipart field 'file' is required".to_string())
+    })?;
+
+    if incoming.sha256 == current.row.sha256 {
+        state.storage.remove_temp(&incoming.temp_path).await;
+        return Err(AppError::Conflict(
+            "new version is identical to the current version".to_string(),
+        ));
+    }
+
+    let final_path = match state
+        .storage
+        .commit_temp(
+            &incoming.temp_path,
+            &incoming.sha256,
+            incoming.extension.as_deref(),
+        )
+        .await
+    {
+        Ok(path) => path,
+        Err(err) => {
+            state.storage.remove_temp(&incoming.temp_path).await;
+            return Err(err);
+        }
+    };
+
+    let relative_path = state.storage.relative_path(&final_path)?;
+    let asset = db::add_asset_version(
+        &state.db,
+        &id,
+        incoming.original_filename,
+        incoming.extension,
+        incoming.mime_type,
+        incoming.byte_size,
+        incoming.sha256,
+        relative_path,
+        note,
+    )
+    .await?;
+
+    if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await {
+            warn!(asset_id = %id, error = %err, "new version stored but preview generation failed");
+        }
+    }
+
+    info!(
+        asset_id = %id,
+        version = asset.current_version,
+        sha256 = %asset.row.sha256,
+        "new asset version stored"
+    );
+    Ok((StatusCode::CREATED, Json(asset)))
+}
+
+async fn download_asset_version(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, i64)>,
+) -> AppResult<Response> {
+    info!(asset_id = %id, version, "asset version download requested");
+    let item = db::get_asset_version(&state.db, &id, version).await?;
+    let path = state.storage.resolve_relative(&item.storage_path)?;
+    let file = File::open(&path).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound
+        } else {
+            AppError::Io(err)
+        }
+    })?;
+
+    let safe_filename: String = item
+        .original_filename
+        .chars()
+        .map(|ch| if ch == char::from(13) || ch == char::from(10) || ch == '"' { '_' } else { ch })
+        .collect();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(r#"attachment; filename="{}""#, safe_filename))
+            .map_err(|_| AppError::BadRequest("invalid filename metadata".to_string()))?,
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&item.byte_size.to_string())
+            .map_err(|_| AppError::Other(anyhow::anyhow!("invalid content length")))?,
+    );
+    if let Some(mime) = item.mime_type.as_deref() {
+        if let Ok(value) = HeaderValue::from_str(mime) {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
+    }
+
+    info!(asset_id = %id, version, path = %path.display(), "asset version download started");
+    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+}
+
+async fn restore_asset_version(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, i64)>,
+    Json(request): Json<RestoreVersionRequest>,
+) -> AppResult<impl IntoResponse> {
+    info!(asset_id = %id, source_version = version, "asset version restore requested");
+    let asset = db::restore_asset_version(&state.db, &id, version, request.note).await?;
+
+    if thumbnail::is_previewable_asset(asset.row.extension.as_deref()) {
+        if let Err(err) = thumbnail::get_or_create_preview(&state.storage, &asset.row).await {
+            warn!(asset_id = %id, error = %err, "restored version preview generation failed");
+        }
+    }
+
+    info!(
+        asset_id = %id,
+        source_version = version,
+        current_version = asset.current_version,
+        "asset version restored as new current revision"
+    );
+    Ok(Json(asset))
 }
 
 async fn restore_asset(
