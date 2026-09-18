@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 12.1 — Scrollable Asset Details Maintenance**
+**Phase 14 — Vault Storage Tiers & Archival**
 
 ### Server
 
@@ -33,6 +33,9 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - project drift detection, pinned-file repair, and explicit update-to-latest workflows
 - trusted-LAN asset checkout/check-in ownership
 - server-enforced mutation locks for checked-out assets
+- verified hot/archive storage tier transitions
+- transparent reads, previews, downloads, versions, and project exports from archived assets
+- archive-aware verified backups
 
 ### Desktop client
 
@@ -56,9 +59,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - engine-specific project destinations
 - Check Project Sync / Repair Pinned Files / Update Project to Latest controls
 - asset Check Out / Check In controls with holder/workstation status
+- per-asset HOT/ARCHIVE status with Archive Asset / Recall to Hot Storage controls
 - persistent daily logs
 
-See `docs/PHASE_1.md` through `docs/PHASE_12.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_12.md` and `docs/PHASE_14.md`.
 
 ## Quick start
 
@@ -195,3 +199,22 @@ Unlocked assets remain editable for backward compatibility. Phase 12 is still a 
 ## Phase 12.1 UI maintenance
 
 The Asset Details side panel is now vertically scrollable. This keeps checkout/check-in controls, metadata actions, version controls, project actions, and removal controls accessible on smaller windows and lower-resolution displays.
+
+
+## Phase 14 storage tiers
+
+Phase 14 adds an optional archive tier for large or infrequently edited source assets. Configure it in `DragonForge.toml`:
+
+```toml
+[storage]
+data_dir = "./data"
+archive_dir = "D:/DragonForge-Archive"
+```
+
+The archive directory must be outside the live data directory.
+
+Archiving copies every binary referenced by the asset—including historical revisions and package files—to the archive tier, verifies SHA-256 before changing catalog paths, and removes an old hot copy only when no remaining catalog reference still points to it. **Recall to Hot Storage** performs the inverse operation.
+
+All existing read paths resolve archived content transparently, so previews, downloads, version history downloads, package files, and project export continue to work while an asset is archived.
+
+Phase 10 backups now include configured archive-tier binaries under `archive/assets/`.
