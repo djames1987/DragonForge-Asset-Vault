@@ -6,6 +6,7 @@ mod licensing;
 mod models;
 mod package;
 mod routes;
+mod semantic;
 mod storage;
 mod thumbnail;
 
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 8,
+        phase = 9,
         log_dir = %log_dir.display(),
         "DragonForge server starting"
     );
@@ -53,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let app = routes::router(
-        AppState { db: pool, storage },
+        AppState {
+            db: pool,
+            storage,
+            semantic: config.semantic.clone(),
+        },
         config.server.max_upload_bytes,
     );
 
@@ -64,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind DragonForge server to {address}"))?;
 
-    info!(%address, "DragonForge Asset Vault Phase 8.1 is online");
+    info!(%address, "DragonForge Asset Vault Phase 9 is online");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
