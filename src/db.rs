@@ -252,6 +252,14 @@ pub async fn get_user_by_token_hash(
     .await?)
 }
 
+pub async fn count_enabled_administrators(pool: &SqlitePool) -> AppResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM vault_users WHERE role = 'administrator' AND enabled = 1",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
 pub async fn count_users(pool: &SqlitePool) -> AppResult<i64> {
     Ok(sqlx::query_scalar("SELECT COUNT(*) FROM vault_users")
         .fetch_one(pool)
