@@ -25,3 +25,13 @@ directory = "./backups"
 keep = 10
 # Add one or more additional local/network-mounted replication roots:
 # replication_targets = ["D:/DragonForge-Backup", "//NAS/DragonForge"]
+
+
+# Phase 13 authentication is optional for backward compatibility.
+# When enabled for the first time, bootstrap_admin_token is required if the
+# vault does not already contain a user.
+#
+# [auth]
+# enabled = true
+# bootstrap_admin_user = "admin"
+# bootstrap_admin_token = "replace-with-a-long-random-token"
