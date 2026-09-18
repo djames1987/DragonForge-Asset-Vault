@@ -362,7 +362,7 @@ fn safe_join(root: &Path, relative: &str) -> AppResult<PathBuf> {
 fn validate_backup_id(value: &str) -> AppResult<()> {
     if value.is_empty()
         || value.contains('/')
-        || value.contains('\')
+        || value.contains('\\')
         || value.contains("..")
         || !value.starts_with("dragonforge-")
     {
