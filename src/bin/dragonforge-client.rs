@@ -115,6 +115,40 @@ struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LicenseStatus {
+    Complete,
+    Warning,
+    Unknown,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectLicenseEntry {
+    asset_id: String,
+    asset_name: String,
+    version_number: i64,
+    license_id: String,
+    status: LicenseStatus,
+    creator: Option<String>,
+    source_url: Option<String>,
+    attribution_required: bool,
+    warnings: Vec<String>,
+    credit_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectLicenseReport {
+    project_id: String,
+    generated_at: String,
+    entries: Vec<ProjectLicenseEntry>,
+    warning_count: usize,
+    unknown_count: usize,
+    credits_text: String,
+    csv_manifest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSettings {
     server_url: String,
 }
@@ -231,6 +265,10 @@ enum ClientEvent {
         asset_id: String,
         result: Result<PackageVersionResponse, String>,
     },
+    ProjectLicenseFiles {
+        project_id: String,
+        result: Result<(PathBuf, usize, usize), String>,
+    },
 }
 
 struct DragonForgeClient {
@@ -243,6 +281,7 @@ struct DragonForgeClient {
     category_filter: String,
     tag_filter: String,
     extension_filter: String,
+    license_filter: String,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -291,6 +330,7 @@ impl DragonForgeClient {
             category_filter: String::new(),
             tag_filter: String::new(),
             extension_filter: String::new(),
+            license_filter: "All".to_string(),
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -367,6 +407,7 @@ impl DragonForgeClient {
             .trim()
             .trim_start_matches('.')
             .to_string();
+        let license_filter = self.license_filter.clone();
         let deleted_only = self.deleted_only;
         self.busy_count += 1;
         self.status = if deleted_only {
@@ -381,6 +422,7 @@ impl DragonForgeClient {
             category = %category,
             tag = %tag,
             extension = %extension,
+            license_filter = %license_filter,
             deleted_only,
             "asset refresh started"
         );
@@ -404,13 +446,17 @@ impl DragonForgeClient {
                 if deleted_only {
                     request = request.query(&[("deleted_only", "true")]);
                 }
-                request
+                let mut assets: Vec<Asset> = request
                     .send()
                     .map_err(|e| e.to_string())?
                     .error_for_status()
                     .map_err(|e| e.to_string())?
                     .json()
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                if license_filter != "All" {
+                    assets.retain(|asset| license_status_label(asset) == license_filter);
+                }
+                Ok(assets)
             })();
             let _ = tx.send(ClientEvent::Assets(result));
         });
@@ -608,6 +654,22 @@ impl DragonForgeClient {
         thread::spawn(move || {
             let result = upload_package_version(&base, &asset_id, &path, &note);
             let _ = tx.send(ClientEvent::PackageVersionChanged { asset_id, result });
+        });
+    }
+
+    fn refresh_project_license_files(&mut self) {
+        let Some(project) = self.selected_project().cloned() else {
+            self.status = "Select a project first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let project_id = project.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Generating license files for {}...", project.name);
+        thread::spawn(move || {
+            let result = write_project_license_files(&base, &project);
+            let _ = tx.send(ClientEvent::ProjectLicenseFiles { project_id, result });
         });
     }
 
@@ -1035,6 +1097,22 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::ProjectLicenseFiles { project_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok((path, warnings, unknown)) => {
+                            info!(project_id = %project_id, path = %path.display(), warnings, unknown, "project license files generated");
+                            self.status = format!(
+                                "License files updated: {} ({} warnings, {} unknown)",
+                                path.display(), warnings, unknown
+                            );
+                        }
+                        Err(err) => {
+                            warn!(project_id = %project_id, error = %err, "project license files failed");
+                            self.status = format!("License report failed: {err}");
+                        }
+                    }
+                }
                 ClientEvent::PackageImported(result) => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
@@ -1161,6 +1239,14 @@ impl DragonForgeClient {
                     .desired_width(75.0)
                     .hint_text("obj"),
             );
+            ui.label("License");
+            egui::ComboBox::from_id_salt("license_status_filter")
+                .selected_text(&self.license_filter)
+                .show_ui(ui, |ui| {
+                    for value in ["All", "Complete", "Warning", "Unknown", "Custom"] {
+                        ui.selectable_value(&mut self.license_filter, value.to_string(), value);
+                    }
+                });
 
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Search").clicked()
@@ -1177,6 +1263,7 @@ impl DragonForgeClient {
                 self.category_filter.clear();
                 self.tag_filter.clear();
                 self.extension_filter.clear();
+                self.license_filter = "All".to_string();
                 self.refresh_assets();
             }
 
@@ -1232,6 +1319,15 @@ impl DragonForgeClient {
 
             if ui.button("New Project").clicked() {
                 self.show_project_create = true;
+            }
+            if ui
+                .add_enabled(
+                    self.selected_project_id.is_some(),
+                    egui::Button::new("Refresh Credits / License Manifest"),
+                )
+                .clicked()
+            {
+                self.refresh_project_license_files();
             }
 
             if ui
@@ -1289,12 +1385,14 @@ impl DragonForgeClient {
                             } else {
                                 ""
                             };
+                            let license_status = license_status_label(asset);
                             let label = format!(
-                                "{marker}{}\n{} · {}\n{}\n{}{}",
+                                "{marker}{}\n{} · {}\n{}\nLicense: {}\n{}{}",
                                 asset.name,
                                 ext,
                                 human_size(asset.byte_size),
                                 category,
+                                license_status,
                                 if asset.tags.is_empty() {
                                     "No tags".to_string()
                                 } else {
@@ -1385,6 +1483,11 @@ impl DragonForgeClient {
                 "Not marked as required"
             }
         ));
+        let license_status = license_status_label(&asset);
+        ui.label(format!("License Status: {license_status}"));
+        for warning in license_warnings(&asset) {
+            ui.label(format!("⚠ {warning}"));
+        }
         if let Some(source) = &asset.source_url {
             ui.label(format!("Source: {source}"));
         }
@@ -1446,7 +1549,7 @@ impl DragonForgeClient {
                 form_row(ui, "Tags", &mut self.upload.tags);
                 form_row(ui, "Creator", &mut self.upload.creator);
                 form_row(ui, "Source URL", &mut self.upload.source_url);
-                form_row(ui, "License", &mut self.upload.license);
+                license_combo(ui, &mut self.upload.license, &mut self.upload.attribution_required);
                 ui.checkbox(&mut self.upload.attribution_required, "Attribution required");
                 ui.label("Description");
                 ui.add(
@@ -1481,7 +1584,7 @@ impl DragonForgeClient {
                 form_row(ui, "Tags", &mut self.edit.tags);
                 form_row(ui, "Creator", &mut self.edit.creator);
                 form_row(ui, "Source URL", &mut self.edit.source_url);
-                form_row(ui, "License", &mut self.edit.license);
+                license_combo(ui, &mut self.edit.license, &mut self.edit.attribution_required);
                 ui.checkbox(&mut self.edit.attribution_required, "Attribution required");
                 ui.label("Description");
                 ui.add(
@@ -1595,7 +1698,7 @@ impl DragonForgeClient {
                 form_row(ui, "Tags", &mut self.package_form.tags);
                 form_row(ui, "Creator", &mut self.package_form.creator);
                 form_row(ui, "Source URL", &mut self.package_form.source_url);
-                form_row(ui, "License", &mut self.package_form.license);
+                license_combo(ui, &mut self.package_form.license, &mut self.package_form.attribution_required);
                 ui.checkbox(&mut self.package_form.attribution_required, "Attribution required");
                 ui.label("Description");
                 ui.add(egui::TextEdit::multiline(&mut self.package_form.description)
@@ -1740,7 +1843,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 7");
+                ui.label("DragonForge Client Phase 8");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -1944,7 +2047,110 @@ fn add_asset_to_project(base: &str, project: &Project, asset: &Asset) -> Result<
         .send().map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?;
 
+    let _ = write_project_license_files(base, project)?;
+
     Ok(primary_target.unwrap_or(export_root))
+}
+
+fn write_project_license_files(
+    base: &str,
+    project: &Project,
+) -> Result<(PathBuf, usize, usize), String> {
+    let report: ProjectLicenseReport = DragonForgeClient::api_client()?
+        .get(format!("{base}/api/projects/{}/license-report", project.id))
+        .send().map_err(|e| e.to_string())?
+        .error_for_status().map_err(|e| e.to_string())?
+        .json().map_err(|e| e.to_string())?;
+
+    let root = PathBuf::from(&project.local_path);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let credits_path = root.join("CREDITS.txt");
+    let json_path = root.join("DragonForge-License-Manifest.json");
+    let csv_path = root.join("DragonForge-License-Manifest.csv");
+
+    fs::write(&credits_path, &report.credits_text).map_err(|e| e.to_string())?;
+    fs::write(
+        &json_path,
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?,
+    ).map_err(|e| e.to_string())?;
+    fs::write(&csv_path, &report.csv_manifest).map_err(|e| e.to_string())?;
+
+    Ok((credits_path, report.warning_count, report.unknown_count))
+}
+
+fn license_status_label(asset: &Asset) -> String {
+    let license = asset.license.as_deref().unwrap_or("").trim();
+    if license.is_empty() || license.eq_ignore_ascii_case("unknown") {
+        return "Unknown".to_string();
+    }
+    if license.eq_ignore_ascii_case("custom") {
+        return "Custom".to_string();
+    }
+    if license.eq_ignore_ascii_case("CC-BY-4.0")
+        || license.eq_ignore_ascii_case("CC BY 4.0")
+    {
+        if asset.creator.as_deref().is_none_or(str::is_empty)
+            || asset.source_url.as_deref().is_none_or(str::is_empty)
+            || !asset.attribution_required
+        {
+            return "Warning".to_string();
+        }
+        return "Complete".to_string();
+    }
+    if license.eq_ignore_ascii_case("CC0-1.0")
+        || license.eq_ignore_ascii_case("CC0")
+    {
+        if asset.source_url.as_deref().is_none_or(str::is_empty) {
+            return "Warning".to_string();
+        }
+        return "Complete".to_string();
+    }
+    "Custom".to_string()
+}
+
+fn license_warnings(asset: &Asset) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let license = asset.license.as_deref().unwrap_or("").trim();
+    if license.is_empty() || license.eq_ignore_ascii_case("unknown") {
+        warnings.push("License has not been verified.".to_string());
+    } else if license.eq_ignore_ascii_case("CC-BY-4.0") || license.eq_ignore_ascii_case("CC BY 4.0") {
+        if asset.creator.as_deref().is_none_or(str::is_empty) {
+            warnings.push("Missing creator/credit name.".to_string());
+        }
+        if asset.source_url.as_deref().is_none_or(str::is_empty) {
+            warnings.push("Missing source URL.".to_string());
+        }
+        if !asset.attribution_required {
+            warnings.push("CC-BY-4.0 should be marked as requiring attribution.".to_string());
+        }
+    } else if (license.eq_ignore_ascii_case("CC0-1.0") || license.eq_ignore_ascii_case("CC0"))
+        && asset.source_url.as_deref().is_none_or(str::is_empty)
+    {
+        warnings.push("Source URL is missing; provenance cannot be verified later.".to_string());
+    }
+    warnings
+}
+
+fn license_combo(ui: &mut egui::Ui, value: &mut String, attribution_required: &mut bool) {
+    let selected = if value.trim().is_empty() { "Unknown" } else { value.as_str() };
+    ui.horizontal(|ui| {
+        ui.label("License:");
+        egui::ComboBox::from_id_salt(ui.next_auto_id())
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (id, label, requires_attribution) in [
+                    ("CC0-1.0", "CC0-1.0 — Creative Commons Zero", false),
+                    ("CC-BY-4.0", "CC-BY-4.0 — Creative Commons Attribution 4.0", true),
+                    ("Custom", "Custom / site-specific", false),
+                    ("Unknown", "Unknown / not verified", false),
+                ] {
+                    if ui.selectable_label(value == id, label).clicked() {
+                        *value = id.to_string();
+                        *attribution_required = requires_attribution;
+                    }
+                }
+            });
+    });
 }
 
 fn sanitize_component(value: &str) -> String {
@@ -2175,7 +2381,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 7,
+        phase = 8,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
