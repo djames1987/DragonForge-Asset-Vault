@@ -616,6 +616,18 @@ impl DragonForgeClient {
         (holder, workstation)
     }
 
+    fn checkout_identity(&self) -> (String, String) {
+        let (legacy_user, workstation) = Self::workstation_identity();
+        let user = self
+            .auth_me
+            .as_ref()
+            .filter(|me| me.enabled && me.authenticated)
+            .and_then(|me| me.username.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(legacy_user);
+        (user, workstation)
+    }
+
     fn api_client() -> Result<Client, String> {
         let (holder, workstation) = Self::workstation_identity();
         let mut headers = ReqwestHeaderMap::new();
@@ -975,7 +987,7 @@ impl DragonForgeClient {
             self.status = "Select an asset first.".to_string();
             return;
         };
-        let (holder, workstation) = Self::workstation_identity();
+        let (holder, workstation) = self.checkout_identity();
         let body = serde_json::json!({
             "holder": holder,
             "workstation": workstation,
@@ -2819,7 +2831,7 @@ impl DragonForgeClient {
         }
 
         ui.separator();
-        let (identity_user, identity_workstation) = Self::workstation_identity();
+        let (identity_user, identity_workstation) = self.checkout_identity();
         match self.checkout_status.get(&asset.id) {
             Some(Some(checkout)) => {
                 ui.label(format!(
