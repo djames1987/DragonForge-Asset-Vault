@@ -1,43 +1,41 @@
 # DragonForge Asset Vault
 
-DragonForge Asset Vault is a LAN-first asset management system for 3D game development. The vault keeps source assets, metadata, hashes, licensing information, previews, and future version data on hardware you control while developer workstations access the library through a dedicated desktop client.
+DragonForge Asset Vault is a LAN-first game-development asset manager. It stores source assets, metadata, hashes, licensing information, previews, project usage, and logs on hardware you control while developer workstations access the vault through a dedicated desktop client.
 
 ## Current milestone
 
-**Phase 3 — Visual Previews + Client/Server Logging**
+**Phase 4 — Asset Management + Projects**
 
-### Asset server
+### Server
 
 - LAN HTTP API
 - SQLite metadata database
-- Filesystem-backed asset storage
-- Streaming uploads/downloads
-- SHA-256 integrity hashes and duplicate detection
-- Asset metadata, categories, tags, source/license fields
-- Search and filtering
-- Metadata updates and soft deletion
-- Health and statistics endpoints
-- Configurable storage/database/listen paths
-- Server-side cached image thumbnails
-- On-demand preview generation for existing images
-- Persistent daily action logs
+- content-addressed filesystem storage
+- streaming uploads/downloads
+- SHA-256 duplicate detection
+- categories, tags, source/license metadata
+- image thumbnails
+- search by text, category, tag, and file type
+- metadata editing
+- recycle-bin soft delete and restore
+- project registry
+- project/asset usage tracking
+- persistent daily action logs
 
 ### Desktop client
 
-- Native Windows-first desktop UI
-- Configurable LAN server address and connection status
-- Searchable/filterable asset card grid
-- Drag-and-drop and file-picker uploads
-- Asset metadata/license entry
-- Background network transfers
-- Image thumbnails in the asset grid
-- Larger image preview in asset details
-- Asset detail view
-- Safe local downloads
-- Persistent workstation settings
-- Persistent daily action logs
+- native Windows-first UI
+- asset grid with image previews
+- drag/drop and file-picker uploads
+- metadata editing
+- category, exact-tag, and file-type filters
+- recycle bin and restore
+- safe downloads
+- project creation/selection
+- copy selected vault assets into a project's `DragonForgeAssets` folder
+- persistent daily action logs
 
-See `docs/PHASE_1.md`, `docs/PHASE_2.md`, and `docs/PHASE_3.md` for setup and validation steps.
+See `docs/PHASE_1.md` through `docs/PHASE_4.md` for milestone-specific setup and validation.
 
 ## Quick start
 
@@ -50,8 +48,6 @@ In another terminal:
 ```powershell
 cargo run --release --bin dragonforge-client
 ```
-
-The actual asset binaries and generated previews are stored on the configured LAN vault disk, not in GitHub.
 
 ## Logs
 
@@ -67,4 +63,4 @@ Windows client:
 %APPDATA%\DragonForge\AssetVault\logs\
 ```
 
-These logs are intended to make testing and troubleshooting easy to verify.
+Asset binaries, previews, database data, and logs remain on the LAN vault/server or local workstation and are not stored in GitHub.
