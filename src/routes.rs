@@ -13,7 +13,7 @@ use crate::{
         BackupVerifyResponse, CheckoutRequest, CheckoutStatusResponse, CreateProjectRequest,
         CreateUserRequest, DeleteResponse, EnginePreset, HealthResponse, ProjectExportPlan,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetBrowserEntry,
-        ProjectAssetRequest, ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse,
+        ProjectAssetCount, ProjectAssetRequest, ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse,
         RestoreVersionRequest,
         SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, StorageTierMoveResponse,
         StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest,
@@ -109,6 +109,7 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
             axum::routing::post(restore_asset_version),
         )
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/asset-counts", get(project_asset_counts))
         .route(
             "/api/projects/:id",
             get(get_project).patch(update_project).delete(delete_project),
@@ -1612,6 +1613,12 @@ async fn delete_project(
     db::delete_project(&state.db, &id).await?;
     info!(project_id = %id, "project deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn project_asset_counts(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<Vec<ProjectAssetCount>>> {
+    Ok(Json(db::list_project_asset_counts(&state.db).await?))
 }
 
 async fn list_project_asset_browser(
