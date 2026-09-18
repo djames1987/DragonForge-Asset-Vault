@@ -550,18 +550,34 @@ pub async fn restore_asset_version(
 ) -> AppResult<Asset> {
     let version = get_asset_version(pool, asset_id, version_number).await?;
     let restore_note = note.or_else(|| Some(format!("Restored from version {}", version_number)));
-    let asset = add_asset_version(
-        pool,
-        asset_id,
-        version.original_filename,
-        version.extension,
-        version.mime_type,
-        version.byte_size,
-        version.sha256,
-        version.storage_path,
-        restore_note,
-    )
-    .await?;
+    let source_package_files = list_package_files(pool, asset_id, version_number).await?;
+    let asset = if source_package_files.is_empty() {
+        add_asset_version(
+            pool,
+            asset_id,
+            version.original_filename,
+            version.extension,
+            version.mime_type,
+            version.byte_size,
+            version.sha256,
+            version.storage_path,
+            restore_note,
+        )
+        .await?
+    } else {
+        add_package_version(
+            pool,
+            asset_id,
+            version.original_filename,
+            version.extension,
+            version.mime_type,
+            version.byte_size,
+            version.sha256,
+            version.storage_path,
+            restore_note,
+        )
+        .await?
+    };
     clone_package_files(pool, asset_id, version_number, asset.current_version).await?;
     Ok(asset)
 }
