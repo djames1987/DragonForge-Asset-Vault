@@ -1,6 +1,6 @@
 [package]
 name = "dragonforge-asset-vault"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 autobins = false
 description = "LAN-first game asset storage vault"
