@@ -257,7 +257,7 @@ async fn hash_file_entry(root: &Path, path: &Path) -> AppResult<BackupFileEntry>
         .strip_prefix(root)
         .map_err(|_| AppError::BadRequest("backup file escaped backup root".to_string()))?
         .to_string_lossy()
-        .replace('\', "/");
+        .replace('\\', "/");
 
     Ok(BackupFileEntry {
         relative_path: relative,
