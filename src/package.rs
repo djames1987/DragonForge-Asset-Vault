@@ -143,11 +143,39 @@ fn extract_zip_blocking(
         .map(|(_, bytes)| bytes.as_slice())
         .ok_or(AppError::NotFound)?;
 
-    let referenced_dependencies = discover_dependencies(&primary_path, primary_bytes);
     let available: HashSet<String> = raw_entries.iter().map(|(p, _)| p.clone()).collect();
+    let mut referenced_dependencies = discover_dependencies(&primary_path, primary_bytes)
+        .into_iter()
+        .filter_map(|dependency| resolve_dependency_path(&primary_path, &dependency))
+        .collect::<Vec<_>>();
+
+    if Path::new(&primary_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("obj"))
+    {
+        let mtls = referenced_dependencies
+            .iter()
+            .filter(|path| Path::new(path).extension().and_then(|v| v.to_str())
+                .is_some_and(|v| v.eq_ignore_ascii_case("mtl")))
+            .cloned()
+            .collect::<Vec<_>>();
+        for mtl_path in mtls {
+            if let Some((_, mtl_bytes)) = raw_entries.iter().find(|(path, _)| path == &mtl_path) {
+                for dependency in discover_dependencies(&mtl_path, mtl_bytes) {
+                    if let Some(resolved) = resolve_dependency_path(&mtl_path, &dependency) {
+                        referenced_dependencies.push(resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    referenced_dependencies.sort();
+    referenced_dependencies.dedup();
     let missing_dependencies = referenced_dependencies
         .iter()
-        .filter(|dependency| !dependency_exists(&available, &primary_path, dependency))
+        .filter(|dependency| !available.contains(*dependency))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -273,17 +301,13 @@ fn discover_dependencies(primary_path: &str, bytes: &[u8]) -> Vec<String> {
     found
 }
 
-fn dependency_exists(available: &HashSet<String>, primary_path: &str, dependency: &str) -> bool {
-    if available.contains(dependency) {
-        return true;
+fn resolve_dependency_path(source_path: &str, dependency: &str) -> Option<String> {
+    let dependency_path = Path::new(dependency);
+    if dependency_path.is_absolute() {
+        return None;
     }
-    let base = Path::new(primary_path).parent().unwrap_or_else(|| Path::new(""));
-    let joined = base.join(dependency);
-    if let Ok(normalized) = normalize_relative(&joined) {
-        available.contains(&normalized)
-    } else {
-        false
-    }
+    let base = Path::new(source_path).parent().unwrap_or_else(|| Path::new(""));
+    normalize_relative(&base.join(dependency_path)).ok()
 }
 
 fn mime_for_extension(extension: Option<&str>) -> Option<&'static str> {
