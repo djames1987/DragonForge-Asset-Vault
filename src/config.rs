@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub semantic: SemanticConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,12 +35,29 @@ pub struct DatabaseConfig {
     pub filename: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SemanticConfig {
+    #[serde(default = "default_semantic_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    #[serde(default = "default_semantic_weight")]
+    pub semantic_weight: f32,
+    #[serde(default = "default_keyword_weight")]
+    pub keyword_weight: f32,
+    #[serde(default = "default_semantic_limit")]
+    pub max_results: usize,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
             storage: StorageConfig::default(),
             database: DatabaseConfig::default(),
+            semantic: SemanticConfig::default(),
         }
     }
 }
@@ -85,3 +104,24 @@ fn default_port() -> u16 { 8080 }
 fn default_max_upload() -> usize { 8 * 1024 * 1024 * 1024 }
 fn default_data_dir() -> PathBuf { PathBuf::from("./data") }
 fn default_db_filename() -> String { "dragonforge.db".to_string() }
+
+
+impl Default for SemanticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_semantic_enabled(),
+            ollama_url: default_ollama_url(),
+            model: default_embedding_model(),
+            semantic_weight: default_semantic_weight(),
+            keyword_weight: default_keyword_weight(),
+            max_results: default_semantic_limit(),
+        }
+    }
+}
+
+fn default_semantic_enabled() -> bool { true }
+fn default_ollama_url() -> String { "http://127.0.0.1:11434".to_string() }
+fn default_embedding_model() -> String { "nomic-embed-text".to_string() }
+fn default_semantic_weight() -> f32 { 0.70 }
+fn default_keyword_weight() -> f32 { 0.30 }
+fn default_semantic_limit() -> usize { 100 }
