@@ -560,7 +560,7 @@ impl DragonForgeClient {
                 let result = (|| -> Result<Vec<u8>, String> {
                     let client = Self::api_client()?;
                     let bytes = client
-                        .get(format!("{base}/api/assets/{request_id}/thumbnail"))
+                        .get(format!("{base}/api/assets/{request_id}/preview"))
                         .send()
                         .map_err(|e| e.to_string())?
                         .error_for_status()
@@ -1253,7 +1253,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 4");
+                ui.label("DragonForge Client Phase 5");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -1485,7 +1485,7 @@ fn human_size(bytes: i64) -> String {
 fn is_previewable_extension(extension: Option<&str>) -> bool {
     matches!(
         extension.map(|v| v.to_ascii_lowercase()).as_deref(),
-        Some("jpg") | Some("jpeg") | Some("png") | Some("webp")
+        Some("jpg") | Some("jpeg") | Some("png") | Some("webp") | Some("obj")
     )
 }
 
@@ -1543,7 +1543,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 4,
+        phase = 5,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
