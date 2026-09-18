@@ -1485,7 +1485,7 @@ fn human_size(bytes: i64) -> String {
 fn is_previewable_extension(extension: Option<&str>) -> bool {
     matches!(
         extension.map(|v| v.to_ascii_lowercase()).as_deref(),
-        Some("jpg") | Some("jpeg") | Some("png") | Some("webp") | Some("obj")
+        Some("jpg") | Some("jpeg") | Some("png") | Some("webp") | Some("obj") | Some("glb") | Some("gltf")
     )
 }
 
