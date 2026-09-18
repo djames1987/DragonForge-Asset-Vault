@@ -27,6 +27,7 @@ pub struct Asset {
     #[serde(flatten)]
     pub row: AssetRow,
     pub tags: Vec<String>,
+    pub current_version: i64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -133,6 +134,7 @@ pub struct UpdateProjectRequest {
 pub struct ProjectAssetRequest {
     pub asset_id: String,
     pub relative_path: Option<String>,
+    pub version_number: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -140,5 +142,26 @@ pub struct ProjectAsset {
     pub project_id: String,
     pub asset_id: String,
     pub relative_path: Option<String>,
+    pub version_number: i64,
     pub added_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AssetVersion {
+    pub id: String,
+    pub asset_id: String,
+    pub version_number: i64,
+    pub original_filename: String,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub storage_path: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestoreVersionRequest {
+    pub note: Option<String>,
 }
