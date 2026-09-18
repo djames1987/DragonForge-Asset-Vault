@@ -386,6 +386,16 @@ fn authorize(request: &Request<Body>, role: &UserRole) -> AppResult<()> {
     let path = request.uri().path();
     let method = request.method();
 
+    if path == "/api/audit/export" {
+        return if role.is_admin() {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(
+                "Administrator role is required for audit export".to_string(),
+            ))
+        };
+    }
+
     if path.starts_with("/api/users") {
         return if role.is_admin() {
             Ok(())
