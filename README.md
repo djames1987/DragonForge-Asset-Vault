@@ -1,10 +1,10 @@
 # DragonForge Asset Vault
 
-DragonForge Asset Vault is a LAN-first game-development asset manager. It stores source assets, metadata, hashes, licensing information, previews, project usage, and logs on hardware you control while developer workstations access the vault through a dedicated desktop client.
+DragonForge Asset Vault is a LAN-first game-development asset manager. It stores source assets, metadata, hashes, licensing information, previews, version history, project usage, and logs on hardware you control.
 
 ## Current milestone
 
-**Phase 5 — Richer Asset Previews**
+**Phase 6 — Asset Versioning + History**
 
 ### Server
 
@@ -14,32 +14,32 @@ DragonForge Asset Vault is a LAN-first game-development asset manager. It stores
 - streaming uploads/downloads
 - SHA-256 duplicate detection
 - categories, tags, source/license metadata
-- search by text, category, tag, and file type
 - metadata editing
 - recycle-bin soft delete and restore
-- project registry and project/asset tracking
-- cached image previews
-- server-rendered OBJ previews
-- server-rendered GLB previews
-- server-rendered embedded-buffer glTF previews
-- generic preview API with backward-compatible thumbnail route
+- image and 3D previews
+- immutable asset revision history
+- version-specific downloads
+- restore old revision as new current revision
+- project registry
+- project/asset version pinning
 - persistent daily action logs
 
 ### Desktop client
 
 - native Windows-first UI
-- asset grid with image and 3D previews
-- larger preview in Asset Details
-- drag/drop and file-picker uploads
+- image and 3D previews
+- searchable/filterable asset library
 - metadata editing
-- category, exact-tag, and file-type filters
 - recycle bin and restore
-- safe downloads
-- project creation/selection
-- copy selected vault assets into a project's `DragonForgeAssets` folder
-- persistent daily action logs
+- project creation and add-to-project workflow
+- **Version History** window
+- upload new asset revision
+- revision notes
+- restore previous revision
+- current version displayed in Asset Details
+- persistent daily logs
 
-See `docs/PHASE_1.md` through `docs/PHASE_5.md` for milestone-specific setup and validation.
+See `docs/PHASE_1.md` through `docs/PHASE_6.md` for milestone-specific setup and validation.
 
 ## Quick start
 
@@ -53,15 +53,13 @@ In another terminal:
 cargo run --release --bin dragonforge-client
 ```
 
-## Preview support
-
-Current preview formats:
+## Current preview formats
 
 ```text
 jpg jpeg png webp obj glb gltf*
 ```
 
-`gltf*` currently means a glTF file with embedded base64 binary buffers. External companion `.bin` files are not yet resolved.
+`gltf*` currently means a glTF file with embedded base64 binary buffers.
 
 ## Logs
 
@@ -77,4 +75,4 @@ Windows client:
 %APPDATA%\DragonForge\AssetVault\logs\
 ```
 
-Asset binaries, previews, database data, and logs remain on the LAN vault/server or local workstation and are not stored in GitHub.
+Asset binaries, historical revisions, previews, database data, and logs remain on the LAN vault/server or local workstation and are not stored in GitHub.
