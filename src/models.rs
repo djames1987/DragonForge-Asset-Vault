@@ -382,3 +382,26 @@ pub struct ProjectExportPlan {
     pub export_path: String,
     pub import_notes: String,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AssetCheckout {
+    pub asset_id: String,
+    pub holder: String,
+    pub workstation: String,
+    pub note: Option<String>,
+    pub checked_out_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutRequest {
+    pub holder: String,
+    pub workstation: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutStatusResponse {
+    pub asset_id: String,
+    pub checkout: Option<AssetCheckout>,
+}
