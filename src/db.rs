@@ -2,7 +2,8 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, PackageFile, Project,
-        ProjectAsset, ProjectAssetRequest, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
+        ProjectAsset, ProjectAssetRequest, SemanticEmbeddingRow, StatsResponse, UpdateAssetRequest,
+        UpdateProjectRequest,
     },
 };
 use sqlx::{
@@ -115,6 +116,17 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS semantic_embeddings (
+            asset_id TEXT PRIMARY KEY NOT NULL,
+            model TEXT NOT NULL,
+            document_hash TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            embedding_json TEXT NOT NULL,
+            indexed_at TEXT NOT NULL,
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS asset_versions (
             id TEXT PRIMARY KEY NOT NULL,
             asset_id TEXT NOT NULL,
@@ -143,6 +155,7 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_package_files_asset ON package_files(asset_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_package_files_sha ON package_files(sha256)",
         "CREATE INDEX IF NOT EXISTS idx_package_dependencies_asset ON package_dependencies(asset_id, version_number)",
+        "CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model ON semantic_embeddings(model)",
     ];
 
     for statement in STATEMENTS {
@@ -262,6 +275,107 @@ pub async fn list_assets(pool: &SqlitePool, query: &AssetQuery) -> AppResult<Vec
     .fetch_all(pool)
     .await?;
 
+    let mut assets = Vec::with_capacity(rows.len());
+    for row in rows {
+        assets.push(hydrate(pool, row).await?);
+    }
+    Ok(assets)
+}
+
+pub async fn upsert_semantic_embedding(
+    pool: &SqlitePool,
+    asset_id: &str,
+    model: &str,
+    document_hash: &str,
+    embedding: &[f32],
+) -> AppResult<()> {
+    let json = serde_json::to_string(embedding)
+        .map_err(|err| AppError::Other(anyhow::anyhow!("embedding serialization failed: {err}")))?;
+    sqlx::query(
+        r#"
+        INSERT INTO semantic_embeddings(
+            asset_id, model, document_hash, dimensions, embedding_json, indexed_at
+        ) VALUES(?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asset_id) DO UPDATE SET
+            model = excluded.model,
+            document_hash = excluded.document_hash,
+            dimensions = excluded.dimensions,
+            embedding_json = excluded.embedding_json,
+            indexed_at = excluded.indexed_at
+        "#,
+    )
+    .bind(asset_id)
+    .bind(model)
+    .bind(document_hash)
+    .bind(embedding.len() as i64)
+    .bind(json)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_semantic_embedding(pool: &SqlitePool, asset_id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM semantic_embeddings WHERE asset_id = ?")
+        .bind(asset_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_semantic_embedding(
+    pool: &SqlitePool,
+    asset_id: &str,
+) -> AppResult<Option<SemanticEmbeddingRow>> {
+    Ok(sqlx::query_as::<_, SemanticEmbeddingRow>(
+        "SELECT asset_id, model, document_hash, dimensions, embedding_json, indexed_at FROM semantic_embeddings WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn list_semantic_embeddings(
+    pool: &SqlitePool,
+    model: &str,
+) -> AppResult<Vec<SemanticEmbeddingRow>> {
+    Ok(sqlx::query_as::<_, SemanticEmbeddingRow>(
+        "SELECT asset_id, model, document_hash, dimensions, embedding_json, indexed_at FROM semantic_embeddings WHERE model = ?",
+    )
+    .bind(model)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn semantic_index_counts(
+    pool: &SqlitePool,
+    model: &str,
+) -> AppResult<(i64, i64)> {
+    let indexed: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM semantic_embeddings se
+        JOIN assets a ON a.id = se.asset_id
+        WHERE se.model = ? AND a.deleted_at IS NULL
+        "#,
+    )
+    .bind(model)
+    .fetch_one(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((indexed, total))
+}
+
+pub async fn list_all_active_assets(pool: &SqlitePool) -> AppResult<Vec<Asset>> {
+    let rows = sqlx::query_as::<_, AssetRow>(
+        "SELECT * FROM assets WHERE deleted_at IS NULL ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
     let mut assets = Vec::with_capacity(rows.len());
     for row in rows {
         assets.push(hydrate(pool, row).await?);
