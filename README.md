@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 14.1 — Phase 13 Security Backfill + Phase 14 Storage Tiers**
+**Phase 15 — Audit Trail, Activity History & Administrative Oversight**
 
 ### Server
 
@@ -40,6 +40,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - Administrator / Developer / Read-only role enforcement
 - server-side user management with token hashing
 - authenticated checkout ownership
+- append-only authenticated audit trail
+- searchable activity history with user/action/target/result/date filters
+- Administrator JSON/CSV audit export
+- role-aware desktop controls that reflect server permissions
 
 ### Desktop client
 
@@ -68,8 +72,11 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - masked API token configuration
 - authenticated user/role display
 - Administrator user-management window
+- Activity window and per-asset activity shortcut
+- Administrator JSON + CSV activity export
+- role-aware disabled mutation controls for Read-only users
 
-See `docs/PHASE_1.md` through `docs/PHASE_14.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_15.md`.
 
 ## Quick start
 
@@ -258,3 +265,14 @@ Phase 12 checkout ownership is now bound to the authenticated username on the se
 ## Phase 13.1 checkout identity maintenance
 
 When authentication is enabled, the desktop client now uses the authenticated DragonForge username—not the local Windows username—to determine whether the selected checkout belongs to the current user. This fixes a case where a Developer could successfully check out an asset but the **Check In** button was hidden when the DragonForge username differed from the Windows account name.
+
+
+## Phase 15 audit trail and activity
+
+Phase 15 records API activity in an append-only SQLite audit table. Events include timestamp, authenticated user, role, workstation, action, HTTP method/path, target type/id, success/failure, status code, and safe detail text.
+
+The desktop **Activity** window supports filtering by user, action, result, target type/id, and RFC3339 date range. Administrators can export the filtered result set to JSON and CSV.
+
+Non-Administrator users can inspect their own activity. Administrators can inspect vault-wide activity.
+
+Read-only users now see mutating desktop controls disabled instead of being invited to click operations that the server will reject with HTTP 403. Server-side authorization remains authoritative.
