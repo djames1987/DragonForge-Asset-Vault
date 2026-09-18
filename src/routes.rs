@@ -379,13 +379,13 @@ async fn asset_preview(
     info!(asset_id = %id, "preview requested");
     let asset = db::get_asset(&state.db, &id, false).await?;
     let package_files = db::list_package_files(&state.db, &id, asset.current_version).await?;
-    let Some(path) = if package_files.is_empty() {
+    let Some(path) = (if package_files.is_empty() {
         thumbnail::get_or_create_preview(&state.storage, &asset.row).await?
     } else {
         thumbnail::get_or_create_package_preview(
             &state.storage, &asset.row, asset.current_version, &package_files
         ).await?
-    } else {
+    }) else {
         info!(
             asset_id = %id,
             extension = ?asset.row.extension,
