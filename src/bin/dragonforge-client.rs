@@ -5,7 +5,10 @@ mod project_sync;
 use project_sync::{EnginePreset, ProjectSyncReport};
 
 use eframe::egui;
-use reqwest::blocking::{multipart, Client};
+use reqwest::{
+    blocking::{multipart, Client},
+    header::{HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -95,6 +98,21 @@ struct BackupStatusResponse {
     replication_targets: Vec<String>,
     keep: usize,
     backups: Vec<BackupSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssetCheckout {
+    asset_id: String,
+    holder: String,
+    workstation: String,
+    note: Option<String>,
+    checked_out_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckoutStatusResponse {
+    asset_id: String,
+    checkout: Option<AssetCheckout>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +332,14 @@ enum ClientEvent {
     ProjectSyncChecked(Result<ProjectSyncReport, String>),
     ProjectSyncRepaired(Result<ProjectSyncReport, String>),
     ProjectSyncUpdated(Result<ProjectSyncReport, String>),
+    CheckoutStatus {
+        asset_id: String,
+        result: Result<CheckoutStatusResponse, String>,
+    },
+    CheckoutChanged {
+        asset_id: String,
+        result: Result<Option<AssetCheckout>, String>,
+    },
     Assets(Result<(Vec<Asset>, Option<String>), String>),
     Projects(Result<Vec<Project>, String>),
     Upload(Result<UploadResponse, String>),
@@ -385,6 +411,8 @@ struct DragonForgeClient {
     engine_presets: Vec<EnginePreset>,
     project_sync_report: Option<ProjectSyncReport>,
     show_project_sync: bool,
+    checkout_status: HashMap<String, Option<AssetCheckout>>,
+    checkout_note: String,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -443,6 +471,8 @@ impl DragonForgeClient {
             engine_presets: Vec::new(),
             project_sync_report: None,
             show_project_sync: false,
+            checkout_status: HashMap::new(),
+            checkout_note: String::new(),
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -480,9 +510,34 @@ impl DragonForgeClient {
         app
     }
 
+    fn workstation_identity() -> (String, String) {
+        let holder = std::env::var("DRAGONFORGE_USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "unknown-user".to_string());
+        let workstation = std::env::var("DRAGONFORGE_WORKSTATION")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown-workstation".to_string());
+        (holder, workstation)
+    }
+
     fn api_client() -> Result<Client, String> {
+        let (holder, workstation) = Self::workstation_identity();
+        let mut headers = ReqwestHeaderMap::new();
+        headers.insert(
+            "x-dragonforge-user",
+            ReqwestHeaderValue::from_str(&holder.replace(['\r', '\n'], "_"))
+                .map_err(|e| e.to_string())?,
+        );
+        headers.insert(
+            "x-dragonforge-workstation",
+            ReqwestHeaderValue::from_str(&workstation.replace(['\r', '\n'], "_"))
+                .map_err(|e| e.to_string())?,
+        );
         Client::builder()
             .connect_timeout(Duration::from_secs(4))
+            .default_headers(headers)
             .build()
             .map_err(|e| e.to_string())
     }
@@ -618,6 +673,85 @@ impl DragonForgeClient {
                     .map_err(|e| e.to_string())
             })();
             let _ = tx.send(ClientEvent::BackupVerified(result));
+        });
+    }
+
+    fn refresh_checkout(&mut self, asset_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<CheckoutStatusResponse, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/assets/{asset_id}/checkout"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::CheckoutStatus { asset_id, result });
+        });
+    }
+
+    fn checkout_selected(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let (holder, workstation) = Self::workstation_identity();
+        let body = serde_json::json!({
+            "holder": holder,
+            "workstation": workstation,
+            "note": if self.checkout_note.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(self.checkout_note.trim().to_string())
+            }
+        });
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Checking out {}...", asset.name);
+        thread::spawn(move || {
+            let result = (|| -> Result<Option<AssetCheckout>, String> {
+                let checkout: AssetCheckout = Self::api_client()?
+                    .post(format!("{base}/api/assets/{asset_id}/checkout"))
+                    .json(&body)
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(checkout))
+            })();
+            let _ = tx.send(ClientEvent::CheckoutChanged { asset_id, result });
+        });
+    }
+
+    fn checkin_selected(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let asset_id = asset.id.clone();
+        self.busy_count += 1;
+        self.status = format!("Checking in {}...", asset.name);
+        thread::spawn(move || {
+            let result = (|| -> Result<Option<AssetCheckout>, String> {
+                Self::api_client()?
+                    .delete(format!("{base}/api/assets/{asset_id}/checkout"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?;
+                Ok(None)
+            })();
+            let _ = tx.send(ClientEvent::CheckoutChanged { asset_id, result });
         });
     }
 
@@ -1513,6 +1647,44 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::CheckoutStatus { asset_id, result } => {
+                    match result {
+                        Ok(response) => {
+                            self.checkout_status.insert(asset_id, response.checkout);
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "checkout status failed");
+                            self.status = format!("Checkout status failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::CheckoutChanged { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(checkout) => {
+                            let message = if let Some(lock) = &checkout {
+                                info!(
+                                    asset_id = %asset_id,
+                                    holder = %lock.holder,
+                                    workstation = %lock.workstation,
+                                    "asset checked out in client"
+                                );
+                                format!("Checked out to {}@{}", lock.holder, lock.workstation)
+                            } else {
+                                info!(asset_id = %asset_id, "asset checked in from client");
+                                "Asset checked in".to_string()
+                            };
+                            self.checkout_status.insert(asset_id, checkout);
+                            self.checkout_note.clear();
+                            self.status = message;
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "checkout operation failed");
+                            self.status = format!("Checkout operation failed: {err}");
+                            self.refresh_checkout(asset_id);
+                        }
+                    }
+                }
                 ClientEvent::Assets(result) => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
@@ -1866,6 +2038,9 @@ impl DragonForgeClient {
             };
             ui.label(connection);
             ui.separator();
+            let (identity_user, identity_workstation) = Self::workstation_identity();
+            ui.label(format!("Identity: {}@{}", identity_user, identity_workstation));
+            ui.separator();
             ui.label(&self.status);
         });
     }
@@ -2143,7 +2318,8 @@ impl DragonForgeClient {
 
         if let Some(id) = chosen {
             info!(asset_id = %id, "asset selected");
-            self.selected_id = Some(id);
+            self.selected_id = Some(id.clone());
+            self.refresh_checkout(id);
         }
     }
 
@@ -2215,6 +2391,58 @@ impl DragonForgeClient {
         }
         if let Some(source) = &asset.source_url {
             ui.label(format!("Source: {source}"));
+        }
+
+        ui.separator();
+        let (identity_user, identity_workstation) = Self::workstation_identity();
+        match self.checkout_status.get(&asset.id) {
+            Some(Some(checkout)) => {
+                ui.label(format!(
+                    "Checked out by: {}@{}",
+                    checkout.holder, checkout.workstation
+                ));
+                ui.small(format!("Since: {}", checkout.checked_out_at));
+                if let Some(note) = checkout.note.as_deref() {
+                    if !note.trim().is_empty() {
+                        ui.label(format!("Checkout note: {note}"));
+                    }
+                }
+                if checkout.holder == identity_user && checkout.workstation == identity_workstation {
+                    if ui
+                        .add_enabled(self.busy_count == 0, egui::Button::new("Check In"))
+                        .clicked()
+                    {
+                        self.checkin_selected();
+                    }
+                } else {
+                    ui.label("LOCKED: mutating operations are blocked from this workstation.");
+                }
+            }
+            Some(None) => {
+                ui.horizontal(|ui| {
+                    ui.label("Checkout note:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.checkout_note)
+                            .desired_width(180.0)
+                            .hint_text("optional")
+                    );
+                });
+                if ui
+                    .add_enabled(
+                        self.busy_count == 0 && asset.deleted_at.is_none(),
+                        egui::Button::new("Check Out"),
+                    )
+                    .clicked()
+                {
+                    self.checkout_selected();
+                }
+            }
+            None => {
+                ui.label("Checkout status: not loaded");
+                if ui.button("Load Checkout Status").clicked() {
+                    self.refresh_checkout(asset.id.clone());
+                }
+            }
         }
 
         ui.separator();
@@ -2713,7 +2941,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 11.1");
+                ui.label("DragonForge Client Phase 12");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -3187,7 +3415,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 11,
+        phase = 12,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
