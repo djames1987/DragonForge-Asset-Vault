@@ -3,7 +3,8 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
-        CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetRequest,
+        CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetBrowserEntry,
+        ProjectAssetRequest,
         AuditEvent, AuditQuery, CreateUserRequest, SemanticEmbeddingRow, StatsResponse,
         StorageObjectRef, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole,
         VaultUser,
@@ -1586,6 +1587,27 @@ pub async fn list_project_assets(
         assets.push(hydrate(pool, row).await?);
     }
     Ok(assets)
+}
+
+pub async fn list_project_asset_browser(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> AppResult<Vec<ProjectAssetBrowserEntry>> {
+    let links = list_project_links(pool, project_id).await?;
+    let mut entries = Vec::with_capacity(links.len());
+
+    for link in links {
+        let asset = get_asset(pool, &link.asset_id, false).await?;
+        entries.push(ProjectAssetBrowserEntry {
+            outdated: link.version_number < asset.current_version,
+            pinned_version: link.version_number,
+            relative_path: link.relative_path.clone(),
+            added_at: link.added_at.clone(),
+            asset,
+        });
+    }
+
+    Ok(entries)
 }
 
 pub async fn get_project_asset_link(
