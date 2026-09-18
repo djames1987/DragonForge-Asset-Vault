@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 14 — Vault Storage Tiers & Archival**
+**Phase 14.1 — Phase 13 Security Backfill + Phase 14 Storage Tiers**
 
 ### Server
 
@@ -36,6 +36,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - verified hot/archive storage tier transitions
 - transparent reads, previews, downloads, versions, and project exports from archived assets
 - archive-aware verified backups
+- optional API-token authentication
+- Administrator / Developer / Read-only role enforcement
+- server-side user management with token hashing
+- authenticated checkout ownership
 
 ### Desktop client
 
@@ -61,8 +65,11 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - asset Check Out / Check In controls with holder/workstation status
 - per-asset HOT/ARCHIVE status with Archive Asset / Recall to Hot Storage controls
 - persistent daily logs
+- masked API token configuration
+- authenticated user/role display
+- Administrator user-management window
 
-See `docs/PHASE_1.md` through `docs/PHASE_12.md` and `docs/PHASE_14.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_14.md`.
 
 ## Quick start
 
@@ -218,3 +225,31 @@ Archiving copies every binary referenced by the asset—including historical rev
 All existing read paths resolve archived content transparently, so previews, downloads, version history downloads, package files, and project export continue to work while an asset is archived.
 
 Phase 10 backups now include configured archive-tier binaries under `archive/assets/`.
+
+
+## Phase 13 authentication and roles
+
+Phase 13 can be enabled in `DragonForge.toml`:
+
+```toml
+[auth]
+enabled = true
+bootstrap_admin_user = "admin"
+bootstrap_admin_token = "replace-with-a-long-random-token"
+```
+
+On the first authenticated startup, if the user table is empty, DragonForge creates the bootstrap Administrator. The bootstrap token must be at least 16 characters. Only a SHA-256 token hash is stored in SQLite.
+
+Roles:
+
+| Role | Access |
+| --- | --- |
+| Administrator | Full access, user management, backup mutations |
+| Developer | Read access plus normal asset/project/check-out/storage mutations |
+| Read-only | GET/HEAD access only |
+
+The public health endpoint remains available so clients can discover whether authentication is enabled. All other API routes require `Authorization: Bearer <token>` when Phase 13 auth is enabled.
+
+The desktop client stores its configured API token in the local client settings file and masks it in the UI. `DRAGONFORGE_API_TOKEN` may be used as an environment-variable override.
+
+Phase 12 checkout ownership is now bound to the authenticated username on the server; the client cannot spoof another checkout holder by changing `X-DragonForge-User`.
