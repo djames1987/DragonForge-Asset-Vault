@@ -1692,9 +1692,20 @@ impl DragonForgeClient {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
                         Ok(health) => {
-                            info!(phase = health.phase, version = %health.version, "server connection successful");
+                            info!(phase = health.phase, version = %health.version, auth_enabled = health.auth_enabled, "server connection successful");
                             self.status = format!("Connected to {} v{}", health.service, health.version);
+                            let auth_enabled = health.auth_enabled;
                             self.health = Some(health);
+                            if auth_enabled {
+                                self.refresh_auth_me();
+                            } else {
+                                self.auth_me = Some(AuthMeResponse {
+                                    enabled: false,
+                                    authenticated: true,
+                                    username: None,
+                                    role: Some(UserRole::Administrator),
+                                });
+                            }
                         }
                         Err(err) => {
                             warn!(error = %err, "server connection failed");
@@ -2376,6 +2387,10 @@ impl DragonForgeClient {
             if ui.button("Connect").clicked() {
                 let _ = save_settings(&self.settings);
                 self.check_server();
+                self.refresh_auth_me();
+                self.refresh_semantic_status();
+                self.refresh_backup_status();
+                self.refresh_engine_presets();
                 self.refresh_assets();
                 self.refresh_projects();
             }
@@ -3485,7 +3500,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 14");
+                ui.label("DragonForge Client Phase 14 · Phase 13 Security");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
