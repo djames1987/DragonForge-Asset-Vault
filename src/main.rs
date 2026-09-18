@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod error;
 mod logging;
+mod licensing;
 mod models;
 mod package;
 mod routes;
