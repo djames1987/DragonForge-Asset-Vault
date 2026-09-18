@@ -2,8 +2,9 @@ use crate::{
     db,
     error::{AppError, AppResult},
     models::{
-        AssetQuery, AssetRow, DeleteResponse, HealthResponse, UpdateAssetRequest, UploadMetadata,
-        UploadResponse,
+        AssetQuery, AssetRow, CreateProjectRequest, DeleteResponse, HealthResponse,
+        ProjectAssetRequest, RestoreResponse, UpdateAssetRequest, UpdateProjectRequest,
+        UploadMetadata, UploadResponse,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
@@ -41,6 +42,20 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         )
         .route("/api/assets/:id/download", get(download_asset))
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
+        .route("/api/assets/:id/restore", axum::routing::post(restore_asset))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route(
+            "/api/projects/:id",
+            get(get_project).patch(update_project).delete(delete_project),
+        )
+        .route(
+            "/api/projects/:id/assets",
+            get(list_project_assets).post(add_project_asset),
+        )
+        .route(
+            "/api/projects/:id/assets/:asset_id",
+            axum::routing::delete(remove_project_asset),
+        )
         .layer(DefaultBodyLimit::max(max_upload_bytes))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -52,7 +67,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 3,
+        phase: 4,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -70,7 +85,9 @@ async fn list_assets(
         search = ?query.q,
         category = ?query.category,
         tag = ?query.tag,
+        extension = ?query.extension,
         include_deleted = query.include_deleted,
+        deleted_only = query.deleted_only,
         limit = ?query.limit,
         offset = ?query.offset,
         "asset list requested"
@@ -354,6 +371,109 @@ async fn asset_thumbnail(
 
     let stream = ReaderStream::new(file);
     Ok((headers, Body::from_stream(stream)).into_response())
+}
+
+async fn restore_asset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    info!(asset_id = %id, "asset restore requested");
+    db::restore_asset(&state.db, &id).await?;
+    info!(asset_id = %id, "asset restored");
+    Ok(Json(RestoreResponse { id, restored: true }))
+}
+
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<impl IntoResponse> {
+    info!("project list requested");
+    let projects = db::list_projects(&state.db).await?;
+    info!(count = projects.len(), "project list returned");
+    Ok(Json(projects))
+}
+
+async fn get_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, "project requested");
+    Ok(Json(db::get_project(&state.db, &id).await?))
+}
+
+async fn create_project(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateProjectRequest>,
+) -> AppResult<impl IntoResponse> {
+    info!(
+        name = %request.name,
+        engine = ?request.engine,
+        local_path = %request.local_path,
+        "project create requested"
+    );
+    let project = db::create_project(&state.db, request).await?;
+    info!(project_id = %project.id, name = %project.name, "project created");
+    Ok((StatusCode::CREATED, Json(project)))
+}
+
+async fn update_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateProjectRequest>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, "project update requested");
+    let project = db::update_project(&state.db, &id, request).await?;
+    info!(project_id = %id, "project updated");
+    Ok(Json(project))
+}
+
+async fn delete_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, "project delete requested");
+    db::delete_project(&state.db, &id).await?;
+    info!(project_id = %id, "project deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_project_assets(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, "project asset list requested");
+    let assets = db::list_project_assets(&state.db, &id).await?;
+    info!(project_id = %id, count = assets.len(), "project asset list returned");
+    Ok(Json(assets))
+}
+
+async fn add_project_asset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<ProjectAssetRequest>,
+) -> AppResult<impl IntoResponse> {
+    info!(
+        project_id = %id,
+        asset_id = %request.asset_id,
+        relative_path = ?request.relative_path,
+        "project asset registration requested"
+    );
+    let link = db::add_project_asset(&state.db, &id, request).await?;
+    info!(
+        project_id = %link.project_id,
+        asset_id = %link.asset_id,
+        "project asset registered"
+    );
+    Ok((StatusCode::CREATED, Json(link)))
+}
+
+async fn remove_project_asset(
+    State(state): State<Arc<AppState>>,
+    Path((id, asset_id)): Path<(String, String)>,
+) -> AppResult<impl IntoResponse> {
+    info!(project_id = %id, asset_id = %asset_id, "project asset removal requested");
+    db::remove_project_asset(&state.db, &id, &asset_id).await?;
+    info!(project_id = %id, asset_id = %asset_id, "project asset removed");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn clean_optional(value: String) -> Option<String> {
