@@ -5,6 +5,8 @@ max_upload_bytes = 8589934592
 
 [storage]
 data_dir = "./data"
+# Optional colder/larger storage tier. Keep this outside data_dir.
+# archive_dir = "D:/DragonForge-Archive"
 
 [database]
 filename = "dragonforge.db"
