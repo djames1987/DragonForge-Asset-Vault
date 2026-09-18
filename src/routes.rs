@@ -9,7 +9,7 @@ use crate::{
     tiering,
     error::{AppError, AppResult},
     models::{
-        AssetQuery, AssetRow, AuthMeResponse, BackupCreateResponse, BackupStatusResponse,
+        AssetQuery, AssetRow, AuditExportResponse, AuditQuery, AuthMeResponse, BackupCreateResponse, BackupStatusResponse,
         BackupVerifyResponse, CheckoutRequest, CheckoutStatusResponse, CreateProjectRequest,
         CreateUserRequest, DeleteResponse, EnginePreset, HealthResponse, ProjectExportPlan,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
@@ -52,6 +52,8 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/me", get(auth_me))
+        .route("/api/audit", get(list_audit))
+        .route("/api/audit/export", get(export_audit))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/:id",
@@ -146,6 +148,64 @@ async fn auth_me(
     Extension(context): Extension<auth::AuthContext>,
 ) -> Json<AuthMeResponse> {
     Json(context.me_response())
+}
+
+async fn list_audit(
+    State(state): State<Arc<AppState>>,
+    Extension(context): Extension<auth::AuthContext>,
+    Query(mut query): Query<AuditQuery>,
+) -> AppResult<Json<Vec<crate::models::AuditEvent>>> {
+    if !context.role.is_admin() {
+        query.username = context.username().map(ToString::to_string);
+    }
+    Ok(Json(db::list_audit_events(&state.db, &query).await?))
+}
+
+async fn export_audit(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuditQuery>,
+) -> AppResult<Json<AuditExportResponse>> {
+    let events = db::list_audit_events(&state.db, &query).await?;
+    let mut csv = String::from(
+        "occurred_at,username,role,workstation,action,method,path,target_type,target_id,result,status_code,detail\n",
+    );
+    for event in &events {
+        let fields = [
+            event.occurred_at.as_str(),
+            event.actor_username.as_deref().unwrap_or(""),
+            event.actor_role.as_deref().unwrap_or(""),
+            event.workstation.as_deref().unwrap_or(""),
+            event.action.as_str(),
+            event.method.as_str(),
+            event.path.as_str(),
+            event.target_type.as_deref().unwrap_or(""),
+            event.target_id.as_deref().unwrap_or(""),
+            event.result.as_str(),
+            &event.status_code.to_string(),
+            event.detail.as_deref().unwrap_or(""),
+        ];
+        csv.push_str(
+            &fields
+                .into_iter()
+                .map(csv_cell)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        csv.push('\n');
+    }
+    Ok(Json(AuditExportResponse {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        events,
+        csv,
+    }))
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 async fn list_users(
