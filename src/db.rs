@@ -1,8 +1,8 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, Project, ProjectAsset,
-        ProjectAssetRequest, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
+        Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, PackageFile, Project,
+        ProjectAsset, ProjectAssetRequest, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
     },
 };
 use sqlx::{
@@ -87,6 +87,24 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS package_files (
+            id TEXT PRIMARY KEY NOT NULL,
+            asset_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            relative_path TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            extension TEXT,
+            mime_type TEXT,
+            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+            sha256 TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            UNIQUE(asset_id, version_number, relative_path),
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS asset_versions (
             id TEXT PRIMARY KEY NOT NULL,
             asset_id TEXT NOT NULL,
@@ -112,6 +130,8 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_project_assets_asset ON project_assets(asset_id)",
         "CREATE INDEX IF NOT EXISTS idx_asset_versions_asset ON asset_versions(asset_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_asset_versions_sha ON asset_versions(sha256)",
+        "CREATE INDEX IF NOT EXISTS idx_package_files_asset ON package_files(asset_id, version_number)",
+        "CREATE INDEX IF NOT EXISTS idx_package_files_sha ON package_files(sha256)",
     ];
 
     for statement in STATEMENTS {
@@ -453,7 +473,7 @@ pub async fn restore_asset_version(
 ) -> AppResult<Asset> {
     let version = get_asset_version(pool, asset_id, version_number).await?;
     let restore_note = note.or_else(|| Some(format!("Restored from version {}", version_number)));
-    add_asset_version(
+    let asset = add_asset_version(
         pool,
         asset_id,
         version.original_filename,
@@ -464,7 +484,113 @@ pub async fn restore_asset_version(
         version.storage_path,
         restore_note,
     )
-    .await
+    .await?;
+    clone_package_files(pool, asset_id, version_number, asset.current_version).await?;
+    Ok(asset)
+}
+
+pub async fn replace_package_files(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+    files: &[PackageFile],
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM package_files WHERE asset_id = ? AND version_number = ?")
+        .bind(asset_id)
+        .bind(version_number)
+        .execute(&mut *tx)
+        .await?;
+
+    for file in files {
+        sqlx::query(
+            r#"
+            INSERT INTO package_files(
+                id, asset_id, version_number, relative_path, original_filename,
+                extension, mime_type, byte_size, sha256, storage_path, is_primary, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&file.id)
+        .bind(asset_id)
+        .bind(version_number)
+        .bind(&file.relative_path)
+        .bind(&file.original_filename)
+        .bind(&file.extension)
+        .bind(&file.mime_type)
+        .bind(file.byte_size)
+        .bind(&file.sha256)
+        .bind(&file.storage_path)
+        .bind(file.is_primary)
+        .bind(&file.created_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn list_package_files(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+) -> AppResult<Vec<PackageFile>> {
+    get_asset_version(pool, asset_id, version_number).await?;
+    Ok(sqlx::query_as::<_, PackageFile>(
+        "SELECT * FROM package_files WHERE asset_id = ? AND version_number = ? ORDER BY is_primary DESC, relative_path COLLATE NOCASE",
+    )
+    .bind(asset_id)
+    .bind(version_number)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_package_file(
+    pool: &SqlitePool,
+    asset_id: &str,
+    version_number: i64,
+    file_id: &str,
+) -> AppResult<PackageFile> {
+    sqlx::query_as::<_, PackageFile>(
+        "SELECT * FROM package_files WHERE asset_id = ? AND version_number = ? AND id = ?",
+    )
+    .bind(asset_id)
+    .bind(version_number)
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+pub async fn clone_package_files(
+    pool: &SqlitePool,
+    asset_id: &str,
+    source_version: i64,
+    target_version: i64,
+) -> AppResult<()> {
+    let source = list_package_files(pool, asset_id, source_version).await?;
+    if source.is_empty() {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let cloned = source
+        .into_iter()
+        .map(|file| PackageFile {
+            id: Uuid::new_v4().to_string(),
+            asset_id: asset_id.to_string(),
+            version_number: target_version,
+            relative_path: file.relative_path,
+            original_filename: file.original_filename,
+            extension: file.extension,
+            mime_type: file.mime_type,
+            byte_size: file.byte_size,
+            sha256: file.sha256,
+            storage_path: file.storage_path,
+            is_primary: file.is_primary,
+            created_at: now.clone(),
+        })
+        .collect::<Vec<_>>();
+    replace_package_files(pool, asset_id, target_version, &cloned).await
 }
 
 pub async fn soft_delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
