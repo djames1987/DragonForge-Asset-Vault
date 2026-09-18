@@ -2919,7 +2919,12 @@ impl eframe::App for DragonForgeClient {
         egui::SidePanel::right("details")
             .default_width(350.0)
             .resizable(true)
-            .show(ctx, |ui| self.details_panel(ui));
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("asset_details_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.details_panel(ui));
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.assets.is_empty() {
@@ -2941,7 +2946,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 12");
+                ui.label("DragonForge Client Phase 12.1");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
