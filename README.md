@@ -253,3 +253,8 @@ The public health endpoint remains available so clients can discover whether aut
 The desktop client stores its configured API token in the local client settings file and masks it in the UI. `DRAGONFORGE_API_TOKEN` may be used as an environment-variable override.
 
 Phase 12 checkout ownership is now bound to the authenticated username on the server; the client cannot spoof another checkout holder by changing `X-DragonForge-User`.
+
+
+## Phase 13.1 checkout identity maintenance
+
+When authentication is enabled, the desktop client now uses the authenticated DragonForge username—not the local Windows username—to determine whether the selected checkout belongs to the current user. This fixes a case where a Developer could successfully check out an asset but the **Check In** button was hidden when the DragonForge username differed from the Windows account name.
