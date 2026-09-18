@@ -80,6 +80,7 @@ pub struct HealthResponse {
     pub service: &'static str,
     pub phase: u8,
     pub version: &'static str,
+    pub auth_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
