@@ -531,3 +531,13 @@ pub struct AuditExportResponse {
     pub events: Vec<AuditEvent>,
     pub csv: String,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectAssetBrowserEntry {
+    pub asset: Asset,
+    pub pinned_version: i64,
+    pub relative_path: Option<String>,
+    pub added_at: String,
+    pub outdated: bool,
+}
