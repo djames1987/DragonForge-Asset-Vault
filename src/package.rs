@@ -103,7 +103,7 @@ fn extract_zip_blocking(
         let enclosed = item
             .enclosed_name()
             .ok_or_else(|| AppError::BadRequest("ZIP contains an unsafe path".to_string()))?;
-        let relative = normalize_relative(enclosed)?;
+        let relative = normalize_relative(&enclosed)?;
         if relative.is_empty() {
             continue;
         }
