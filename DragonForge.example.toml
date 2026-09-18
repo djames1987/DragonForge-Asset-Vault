@@ -16,3 +16,10 @@ model = "nomic-embed-text"
 semantic_weight = 0.70
 keyword_weight = 0.30
 max_results = 100
+
+
+[backup]
+directory = "./backups"
+keep = 10
+# Add one or more additional local/network-mounted replication roots:
+# replication_targets = ["D:/DragonForge-Backup", "//NAS/DragonForge"]
