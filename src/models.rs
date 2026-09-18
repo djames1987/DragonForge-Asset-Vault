@@ -541,3 +541,10 @@ pub struct ProjectAssetBrowserEntry {
     pub added_at: String,
     pub outdated: bool,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProjectAssetCount {
+    pub project_id: String,
+    pub asset_count: i64,
+}
