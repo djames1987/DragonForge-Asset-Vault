@@ -94,6 +94,23 @@ impl Storage {
         Ok(final_path)
     }
 
+    pub async fn store_bytes(
+        &self,
+        bytes: &[u8],
+        extension: Option<&str>,
+    ) -> AppResult<(String, String)> {
+        let sha256 = hex::encode(Sha256::digest(bytes));
+        let final_path = self.final_path(&sha256, extension);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        if !fs::try_exists(&final_path).await? {
+            fs::write(&final_path, bytes).await?;
+        }
+        let relative = self.relative_path(&final_path)?;
+        Ok((sha256, relative))
+    }
+
     pub async fn remove_temp(&self, path: &Path) {
         let _ = fs::remove_file(path).await;
     }
