@@ -3127,12 +3127,12 @@ impl DragonForgeClient {
             if ui.button("Package / Dependencies").clicked() {
                 self.open_package_contents();
             }
-            if ui.button("Move to Recycle Bin").clicked() {
+            if ui.add_enabled(can_write, egui::Button::new("Move to Recycle Bin")).clicked() {
                 self.delete_selected();
             }
             if ui
                 .add_enabled(
-                    self.selected_project_id.is_some(),
+                    can_write && self.selected_project_id.is_some(),
                     egui::Button::new("Add to Selected Project"),
                 )
                 .clicked()
@@ -3141,7 +3141,7 @@ impl DragonForgeClient {
             }
             if ui
                 .add_enabled(
-                    self.selected_project_id.is_some(),
+                    can_write && self.selected_project_id.is_some(),
                     egui::Button::new("Remove from Selected Project"),
                 )
                 .clicked()
@@ -3181,7 +3181,7 @@ impl DragonForgeClient {
                 );
                 ui.separator();
                 if ui
-                    .add_enabled(self.busy_count == 0, egui::Button::new("Upload to Vault"))
+                    .add_enabled(self.busy_count == 0 && self.can_write(), egui::Button::new("Upload to Vault"))
                     .clicked()
                 {
                     self.submit_upload();
@@ -3287,7 +3287,10 @@ impl DragonForgeClient {
                                 ui.label(format!("Note: {note}"));
                             }
                             if version.version_number != current_version
-                                && ui.button(format!("Restore v{} as New Current Version", version.version_number)).clicked()
+                                && ui.add_enabled(
+                                    self.can_write(),
+                                    egui::Button::new(format!("Restore v{} as New Current Version", version.version_number)),
+                                ).clicked()
                             {
                                 self.restore_version(version.version_number);
                             }
