@@ -1,3 +1,4 @@
+mod backup;
 mod config;
 mod db;
 mod error;
@@ -35,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 9,
+        phase = 10,
         log_dir = %log_dir.display(),
         "DragonForge server starting"
     );
@@ -58,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
             db: pool,
             storage,
             semantic: config.semantic.clone(),
+            backup: config.backup.clone(),
+            database_filename: config.database.filename.clone(),
         },
         config.server.max_upload_bytes,
     );
@@ -69,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind DragonForge server to {address}"))?;
 
-    info!(%address, "DragonForge Asset Vault Phase 9 is online");
+    info!(%address, "DragonForge Asset Vault Phase 10 is online");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
