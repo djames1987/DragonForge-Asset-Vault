@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 11.1 — Project Removal Attribution Maintenance**
+**Phase 12 — Asset Checkout & Collaboration Locks**
 
 ### Server
 
@@ -31,6 +31,8 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - configurable retention and replication targets
 - engine-aware project export presets for Godot, Unity, Unreal, Roblox/Rojo, Minecraft Bedrock, and Generic projects
 - project drift detection, pinned-file repair, and explicit update-to-latest workflows
+- trusted-LAN asset checkout/check-in ownership
+- server-enforced mutation locks for checked-out assets
 
 ### Desktop client
 
@@ -53,9 +55,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - one-click Create Backup / Verify Latest controls
 - engine-specific project destinations
 - Check Project Sync / Repair Pinned Files / Update Project to Latest controls
+- asset Check Out / Check In controls with holder/workstation status
 - persistent daily logs
 
-See `docs/PHASE_1.md` through `docs/PHASE_11.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_12.md`.
 
 ## Quick start
 
@@ -172,3 +175,18 @@ Use **Check Project Sync** to verify exported files against the vault using SHA-
 ## Phase 11.1 maintenance
 
 Engine-aware **Remove from Project** now immediately regenerates `CREDITS.txt`, `DragonForge-License-Manifest.json`, and `DragonForge-License-Manifest.csv` after a successful project unlink. A manifest-write failure is reported without undoing the already-successful removal.
+
+
+## Phase 12 collaboration locks
+
+DragonForge desktop clients identify themselves using:
+
+```text
+<WindowsUser>@<ComputerName>
+```
+
+with `DRAGONFORGE_USER` and `DRAGONFORGE_WORKSTATION` environment-variable overrides when needed.
+
+A checked-out asset is protected from mutating requests originating from another client identity. Protected operations include metadata edits, new single-file/package revisions, version restores, soft delete, and restore.
+
+Unlocked assets remain editable for backward compatibility. Phase 12 is still a trusted-LAN collaboration system, not an authentication boundary.
