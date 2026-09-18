@@ -568,20 +568,25 @@ impl DragonForgeClient {
         });
     }
 
+    fn refresh_package_manifest(&mut self, asset_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        info!(asset_id = %asset_id, "package manifest refresh started");
+        thread::spawn(move || {
+            let result = fetch_package_manifest(&base, &asset_id);
+            let _ = tx.send(ClientEvent::PackageManifestLoaded { asset_id, result });
+        });
+    }
+
     fn open_package_contents(&mut self) {
         let Some(asset) = self.selected_asset().cloned() else {
             self.status = "Select an asset first.".to_string();
             return;
         };
-        let tx = self.tx.clone();
-        let base = self.base_url();
         let asset_id = asset.id.clone();
-        self.busy_count += 1;
         self.show_package_contents = true;
-        thread::spawn(move || {
-            let result = fetch_package_manifest(&base, &asset_id);
-            let _ = tx.send(ClientEvent::PackageManifestLoaded { asset_id, result });
-        });
+        self.refresh_package_manifest(asset_id);
     }
 
     fn upload_package_version(&mut self) {
@@ -1021,6 +1026,7 @@ impl DragonForgeClient {
                             self.thumbnail_pending.remove(&asset_id);
                             self.version_note.clear();
                             self.refresh_versions(asset_id.clone());
+                            self.refresh_package_manifest(asset_id.clone());
                             self.refresh_assets();
                         }
                         Err(err) => {
