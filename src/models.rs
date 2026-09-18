@@ -430,3 +430,64 @@ pub struct StorageTierMoveResponse {
     pub bytes_moved: u64,
     pub source_copies_removed: usize,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
+#[sqlx(type_name = "TEXT")]
+#[serde(rename_all = "snake_case")]
+pub enum UserRole {
+    Administrator,
+    Developer,
+    ReadOnly,
+}
+
+impl UserRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Administrator => "administrator",
+            Self::Developer => "developer",
+            Self::ReadOnly => "read_only",
+        }
+    }
+
+    pub fn can_write(&self) -> bool {
+        matches!(self, Self::Administrator | Self::Developer)
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Administrator)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct VaultUser {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub role: UserRole,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateUserRequest {
+    pub role: Option<UserRole>,
+    pub enabled: Option<bool>,
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthMeResponse {
+    pub enabled: bool,
+    pub authenticated: bool,
+    pub username: Option<String>,
+    pub role: Option<UserRole>,
+}
