@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager. It stores
 
 ## Current milestone
 
-**Phase 7 — Asset Packaging, Dependencies, and Multi-File Assets**
+**Phase 7.1 — Package Restore Preview & Client Refresh Fix**
 
 ### Server
 
@@ -78,7 +78,7 @@ DragonForge stores each file by its own SHA-256 while keeping the logical packag
 jpg jpeg png webp obj glb gltf
 ```
 
-Phase 7 supports external glTF buffers when they are included in the imported package.
+Phase 7.1 keeps package-aware previews working after revision restores and refreshes package/dependency state in the client after version changes.
 
 ## Logs
 
