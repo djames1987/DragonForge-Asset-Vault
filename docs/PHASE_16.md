@@ -278,3 +278,77 @@ continue using the Phase 1–15 API/event plumbing.
 12. Test Administrator Users page.
 13. Log in as Read-only and confirm mutation controls remain disabled.
 14. Send client/server logs plus screenshots if any layout issue appears.
+
+
+# Phase 16.1 — DragonForge Visual Redesign
+
+Runtime review of Phase 16 showed that the adaptive asset grid still behaved like a dense developer utility and produced severe text wrapping when the library, navigation, and Inspector competed for width.
+
+Phase 16.1 changes the visual hierarchy rather than merely tuning card dimensions.
+
+## Reference direction
+
+The redesign follows the visual language of the DragonForge Password Manager project:
+
+- dark blue-black surfaces rather than flat gray
+- strong orange brand accent
+- large intentional spacing
+- clear left navigation hierarchy
+- fixed-width browsing column
+- large detail workspace
+- restrained secondary metadata
+- clear empty state
+- fewer simultaneous controls
+
+## Assets layout
+
+```text
+Navigation | Asset Browser | Asset Details
+```
+
+The asset browser is now a vertical list. Each item contains:
+
+- thumbnail/type block
+- asset name
+- extension
+- size
+- version
+- category
+- checkout owner when applicable
+- archived indicator
+
+Selecting a list item updates the large detail workspace.
+
+## Empty state
+
+With no selection, the details workspace displays a centered **Select an asset** prompt rather than an empty Inspector panel.
+
+## Asset details
+
+The detail workspace emphasizes:
+
+1. asset name and source filename
+2. large preview
+3. Download / Check Out-In / Edit / Version History / Activity
+4. General metadata
+5. Tags
+6. Collaboration
+7. Storage
+8. Project actions
+9. Package / recycle actions
+
+## Visual system
+
+Dark palette:
+
+```text
+Base        #0B0E14
+Panel       #10141D
+Raised      #171C27
+Secondary   #8D9AB5
+Accent      #FF8A2A
+```
+
+The accent is used for branding, primary actions, selected elements, focus, and important status rather than as a general background color.
+
+All Phase 1–16 functionality and server APIs remain intact.
