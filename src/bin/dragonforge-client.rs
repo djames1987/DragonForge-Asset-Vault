@@ -2132,11 +2132,15 @@ fn license_warnings(asset: &Asset) -> Vec<String> {
 }
 
 fn license_combo(ui: &mut egui::Ui, value: &mut String, attribution_required: &mut bool) {
-    let selected = if value.trim().is_empty() { "Unknown" } else { value.as_str() };
+    let selected = if value.trim().is_empty() {
+        "Unknown".to_string()
+    } else {
+        value.clone()
+    };
     ui.horizontal(|ui| {
         ui.label("License:");
         egui::ComboBox::from_id_salt(ui.next_auto_id())
-            .selected_text(selected)
+            .selected_text(&selected)
             .show_ui(ui, |ui| {
                 for (id, label, requires_attribution) in [
                     ("CC0-1.0", "CC0-1.0 — Creative Commons Zero", false),
