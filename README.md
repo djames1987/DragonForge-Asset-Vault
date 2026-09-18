@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 16.1 — DragonForge Visual Redesign**
+**Phase 16.2 — Project Asset Browser**
 
 ### Server
 
@@ -80,6 +80,9 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - fixed-width searchable asset list instead of the Phase 16 card grid
 - large asset detail/preview workspace
 - orange-accent DragonForge visual system
+- project-scoped asset browsing with pinned-version/path status
+- per-project asset counts and sidebar quick links
+- per-asset update-to-latest from project view
 - dedicated Projects, Activity, Backups, AI Search, Users, and Settings pages
 - persistent theme, UI scale, card size, and layout preferences
 
@@ -330,3 +333,22 @@ The middle asset browser is intentionally fixed-width and list-oriented so names
 The right workspace provides a large preview, primary actions, and clearly separated General, Tags, Collaboration, Storage, Project, and More sections.
 
 The dark theme uses a blue-black base, raised panels, muted blue-gray secondary text, and a restrained orange accent derived from the password-manager reference.
+
+
+## Phase 16.2 project asset browser
+
+Projects can now be opened directly in the normal three-column asset workflow.
+
+Use **Projects → Browse Assets**, or a project quick link in the left sidebar, to switch the asset list into a project-scoped mode.
+
+Project asset rows show:
+
+```text
+Pinned vN · Latest vN · CURRENT/OUTDATED · exported/relative/path
+```
+
+The normal large asset detail workspace remains available while browsing a project.
+
+When a project pin is behind the current vault revision, the detail pane offers **Update This Asset to Latest** for Developer/Administrator users. Existing safe **Remove from Project** behavior also works directly from the project-scoped browser.
+
+Read-only users may browse project assets, pinned versions, paths, previews, downloads, versions, and activity, but project mutations remain disabled and server-enforced.
