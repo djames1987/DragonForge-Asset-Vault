@@ -41,6 +41,22 @@ struct Asset {
     updated_at: String,
     deleted_at: Option<String>,
     tags: Vec<String>,
+    current_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssetVersion {
+    id: String,
+    asset_id: String,
+    version_number: i64,
+    original_filename: String,
+    extension: Option<String>,
+    mime_type: Option<String>,
+    byte_size: i64,
+    sha256: String,
+    storage_path: String,
+    note: Option<String>,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +162,14 @@ enum ClientEvent {
         asset_id: String,
         result: Result<PathBuf, String>,
     },
+    Versions {
+        asset_id: String,
+        result: Result<Vec<AssetVersion>, String>,
+    },
+    VersionChanged {
+        asset_id: String,
+        result: Result<Asset, String>,
+    },
 }
 
 struct DragonForgeClient {
@@ -167,6 +191,10 @@ struct DragonForgeClient {
     show_upload: bool,
     show_edit: bool,
     show_project_create: bool,
+    show_versions: bool,
+    version_asset_id: Option<String>,
+    versions: Vec<AssetVersion>,
+    version_note: String,
     busy_count: usize,
     thumbnails: HashMap<String, egui::TextureHandle>,
     thumbnail_pending: HashSet<String>,
@@ -207,6 +235,10 @@ impl DragonForgeClient {
             show_upload: false,
             show_edit: false,
             show_project_create: false,
+            show_versions: false,
+            version_asset_id: None,
+            versions: Vec::new(),
+            version_note: String::new(),
             busy_count: 0,
             thumbnails: HashMap::new(),
             thumbnail_pending: HashSet::new(),
@@ -373,6 +405,67 @@ impl DragonForgeClient {
         thread::spawn(move || {
             let result = upload_asset(&base, &form_data);
             let _ = tx.send(ClientEvent::Upload(result));
+        });
+    }
+
+    fn open_versions_selected(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        self.version_asset_id = Some(asset.id.clone());
+        self.show_versions = true;
+        self.refresh_versions(asset.id);
+    }
+
+    fn refresh_versions(&mut self, asset_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        info!(asset_id = %asset_id, "asset version history refresh started");
+        thread::spawn(move || {
+            let result = fetch_versions(&base, &asset_id);
+            let _ = tx.send(ClientEvent::Versions { asset_id, result });
+        });
+    }
+
+    fn upload_new_version(&mut self) {
+        let Some(asset_id) = self.version_asset_id.clone() else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Select replacement file for new version")
+            .pick_file()
+        else {
+            return;
+        };
+
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let note = self.version_note.trim().to_string();
+        self.busy_count += 1;
+        self.status = format!("Uploading new version from {}...", path.display());
+        info!(asset_id = %asset_id, path = %path.display(), "new asset version upload started");
+
+        thread::spawn(move || {
+            let result = upload_asset_version(&base, &asset_id, &path, &note);
+            let _ = tx.send(ClientEvent::VersionChanged { asset_id, result });
+        });
+    }
+
+    fn restore_version(&mut self, version_number: i64) {
+        let Some(asset_id) = self.version_asset_id.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        self.status = format!("Restoring version {version_number}...");
+        info!(asset_id = %asset_id, version_number, "asset version restore started");
+
+        thread::spawn(move || {
+            let result = restore_asset_version(&base, &asset_id, version_number);
+            let _ = tx.send(ClientEvent::VersionChanged { asset_id, result });
         });
     }
 
@@ -768,6 +861,37 @@ impl DragonForgeClient {
                         Err(err) => self.status = format!("Add to project failed: {err}"),
                     }
                 }
+                ClientEvent::Versions { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(versions) => {
+                            info!(asset_id = %asset_id, count = versions.len(), "asset version history loaded");
+                            self.versions = versions;
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "asset version history failed");
+                            self.status = format!("Version history failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::VersionChanged { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(asset) => {
+                            info!(asset_id = %asset_id, version = asset.current_version, "asset version changed");
+                            self.status = format!("{} is now version {}", asset.name, asset.current_version);
+                            self.thumbnails.remove(&asset_id);
+                            self.thumbnail_pending.remove(&asset_id);
+                            self.version_note.clear();
+                            self.refresh_versions(asset_id.clone());
+                            self.refresh_assets();
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "asset version change failed");
+                            self.status = format!("Version operation failed: {err}");
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
         }
@@ -1028,6 +1152,7 @@ impl DragonForgeClient {
         ));
         ui.label(format!("Added: {}", asset.created_at));
         ui.label(format!("Updated: {}", asset.updated_at));
+        ui.label(format!("Current Version: v{}", asset.current_version));
         if let Some(deleted_at) = &asset.deleted_at {
             ui.label(format!("Deleted: {deleted_at}"));
         }
@@ -1078,6 +1203,9 @@ impl DragonForgeClient {
             }
             if ui.button("Edit Metadata").clicked() {
                 self.begin_edit_selected();
+            }
+            if ui.button("Version History").clicked() {
+                self.open_versions_selected();
             }
             if ui.button("Move to Recycle Bin").clicked() {
                 self.delete_selected();
@@ -1166,6 +1294,78 @@ impl DragonForgeClient {
                 }
             });
         self.show_edit = open && self.show_edit;
+    }
+
+    fn versions_window(&mut self, ctx: &egui::Context) {
+        if !self.show_versions {
+            return;
+        }
+
+        let mut open = self.show_versions;
+        let current_version = self
+            .selected_asset()
+            .map(|asset| asset.current_version)
+            .unwrap_or_default();
+        let versions = self.versions.clone();
+
+        egui::Window::new("Asset Version History")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(620.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Current: v{current_version}"));
+                    if ui.button("Refresh History").clicked() {
+                        if let Some(id) = self.version_asset_id.clone() {
+                            self.refresh_versions(id);
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("New version note:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.version_note)
+                            .desired_width(320.0)
+                            .hint_text("What changed?"),
+                    );
+                    if ui.button("Upload New Version").clicked() {
+                        self.upload_new_version();
+                    }
+                });
+
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for version in &versions {
+                        ui.group(|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.heading(format!("v{}", version.version_number));
+                                if version.version_number == current_version {
+                                    ui.label("CURRENT");
+                                }
+                                ui.label(format!(
+                                    "{} · {}",
+                                    version.original_filename,
+                                    human_size(version.byte_size)
+                                ));
+                            });
+                            ui.small(format!("SHA-256: {}", version.sha256));
+                            ui.small(format!("Created: {}", version.created_at));
+                            if let Some(note) = &version.note {
+                                ui.label(format!("Note: {note}"));
+                            }
+                            if version.version_number != current_version
+                                && ui.button(format!("Restore v{} as New Current Version", version.version_number)).clicked()
+                            {
+                                self.restore_version(version.version_number);
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+
+        self.show_versions = open;
     }
 
     fn project_window(&mut self, ctx: &egui::Context) {
@@ -1260,7 +1460,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 5");
+                ui.label("DragonForge Client Phase 6");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
@@ -1269,6 +1469,7 @@ impl eframe::App for DragonForgeClient {
         self.upload_window(ctx);
         self.edit_window(ctx);
         self.project_window(ctx);
+        self.versions_window(ctx);
     }
 }
 
@@ -1422,7 +1623,8 @@ fn add_asset_to_project(base: &str, project: &Project, asset: &Asset) -> Result<
 
     let body = serde_json::json!({
         "asset_id": asset.id,
-        "relative_path": relative_path
+        "relative_path": relative_path,
+        "version_number": asset.current_version
     });
 
     client
@@ -1434,6 +1636,61 @@ fn add_asset_to_project(base: &str, project: &Project, asset: &Asset) -> Result<
         .map_err(|e| e.to_string())?;
 
     Ok(target)
+}
+
+fn fetch_versions(base: &str, asset_id: &str) -> Result<Vec<AssetVersion>, String> {
+    DragonForgeClient::api_client()?
+        .get(format!("{base}/api/assets/{asset_id}/versions"))
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())
+}
+
+fn upload_asset_version(
+    base: &str,
+    asset_id: &str,
+    path: &Path,
+    note: &str,
+) -> Result<Asset, String> {
+    let client = DragonForgeClient::api_client()?;
+    let file_part = multipart::Part::file(path).map_err(|e| e.to_string())?;
+    let mut form = multipart::Form::new().part("file", file_part);
+    if !note.is_empty() {
+        form = form.text("note", note.to_string());
+    }
+
+    client
+        .post(format!("{base}/api/assets/{asset_id}/versions"))
+        .multipart(form)
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())
+}
+
+fn restore_asset_version(
+    base: &str,
+    asset_id: &str,
+    version_number: i64,
+) -> Result<Asset, String> {
+    DragonForgeClient::api_client()?
+        .post(format!(
+            "{base}/api/assets/{asset_id}/versions/{version_number}/restore"
+        ))
+        .json(&serde_json::json!({
+            "note": format!("Restored from version {version_number} via desktop client")
+        }))
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())
 }
 
 fn unique_download_path(folder: &Path, filename: &str) -> PathBuf {
@@ -1550,7 +1807,7 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 5,
+        phase = 6,
         log_dir = %log_dir.display(),
         "DragonForge client starting"
     );
