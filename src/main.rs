@@ -1,3 +1,4 @@
+mod auth;
 mod backup;
 mod config;
 mod db;
@@ -59,16 +60,18 @@ async fn main() -> anyhow::Result<()> {
         "vault storage initialized"
     );
 
-    let app = routes::router(
-        AppState {
-            db: pool,
-            storage,
-            semantic: config.semantic.clone(),
-            backup: config.backup.clone(),
-            database_filename: config.database.filename.clone(),
-        },
-        config.server.max_upload_bytes,
-    );
+    let state = AppState {
+        db: pool,
+        storage,
+        semantic: config.semantic.clone(),
+        backup: config.backup.clone(),
+        auth: config.auth.clone(),
+        database_filename: config.database.filename.clone(),
+    };
+    auth::initialize_bootstrap(&state)
+        .await
+        .context("failed to initialize Phase 13 authentication")?;
+    let app = routes::router(state, config.server.max_upload_bytes);
 
     let address: SocketAddr = format!("{}:{}", config.server.bind, config.server.port)
         .parse()
