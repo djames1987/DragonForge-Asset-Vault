@@ -10,21 +10,26 @@ pub struct Storage {
     assets_dir: PathBuf,
     temp_dir: PathBuf,
     previews_dir: PathBuf,
+    archive_dir: Option<PathBuf>,
 }
 
 impl Storage {
-    pub async fn new(root: PathBuf) -> anyhow::Result<Self> {
+    pub async fn new(root: PathBuf, archive_dir: Option<PathBuf>) -> anyhow::Result<Self> {
         let assets_dir = root.join("assets");
         let temp_dir = root.join("temp");
         let previews_dir = root.join("previews");
         fs::create_dir_all(&assets_dir).await?;
         fs::create_dir_all(&temp_dir).await?;
         fs::create_dir_all(&previews_dir).await?;
+        if let Some(dir) = archive_dir.as_ref() {
+            fs::create_dir_all(dir.join("assets")).await?;
+        }
         Ok(Self {
             root,
             assets_dir,
             temp_dir,
             previews_dir,
+            archive_dir,
         })
     }
 
@@ -72,10 +77,50 @@ impl Storage {
     }
 
     pub fn resolve_relative(&self, relative: &str) -> AppResult<PathBuf> {
+        if let Some(rest) = relative.strip_prefix("archive://") {
+            if rest.contains("..") {
+                return Err(AppError::BadRequest("invalid archive storage path".to_string()));
+            }
+            let root = self.archive_dir.as_ref().ok_or_else(|| {
+                AppError::BadRequest("archive storage is not configured".to_string())
+            })?;
+            return Ok(root.join(rest));
+        }
         if relative.contains("..") {
             return Err(AppError::BadRequest("invalid storage path".to_string()));
         }
         Ok(self.root.join(relative))
+    }
+
+    pub fn archive_directory(&self) -> AppResult<&Path> {
+        self.archive_dir
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("archive storage is not configured".to_string()))
+    }
+
+    pub fn archive_key(&self, hot_relative: &str) -> AppResult<String> {
+        if hot_relative.starts_with("archive://") {
+            return Ok(hot_relative.to_string());
+        }
+        if hot_relative.contains("..") || Path::new(hot_relative).is_absolute() {
+            return Err(AppError::BadRequest("invalid storage path".to_string()));
+        }
+        Ok(format!("archive://{hot_relative}"))
+    }
+
+    pub fn hot_key(&self, storage_path: &str) -> AppResult<String> {
+        if let Some(rest) = storage_path.strip_prefix("archive://") {
+            if rest.contains("..") || Path::new(rest).is_absolute() {
+                return Err(AppError::BadRequest("invalid archive storage path".to_string()));
+            }
+            Ok(rest.to_string())
+        } else {
+            Ok(storage_path.to_string())
+        }
+    }
+
+    pub fn archive_enabled(&self) -> bool {
+        self.archive_dir.is_some()
     }
 
     pub async fn commit_temp(
