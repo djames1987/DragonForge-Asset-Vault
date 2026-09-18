@@ -13,6 +13,10 @@ pub enum AppError {
     BadRequest(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -34,6 +38,8 @@ impl IntoResponse for AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Multipart(_) => StatusCode::BAD_REQUEST,
             Self::Io(_) | Self::Db(_) | Self::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
