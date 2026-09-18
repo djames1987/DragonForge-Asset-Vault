@@ -979,6 +979,22 @@ pub async fn list_project_assets(
     Ok(assets)
 }
 
+pub async fn get_project_asset_link(
+    pool: &SqlitePool,
+    project_id: &str,
+    asset_id: &str,
+) -> AppResult<ProjectAsset> {
+    get_project(pool, project_id).await?;
+    sqlx::query_as::<_, ProjectAsset>(
+        "SELECT project_id, asset_id, relative_path, version_number, added_at FROM project_assets WHERE project_id = ? AND asset_id = ?",
+    )
+    .bind(project_id)
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
 pub async fn remove_project_asset(
     pool: &SqlitePool,
     project_id: &str,
