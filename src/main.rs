@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 12,
+        phase = 14,
         log_dir = %log_dir.display(),
         "DragonForge server starting"
     );
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind DragonForge server to {address}"))?;
 
-    info!(%address, "DragonForge Asset Vault Phase 12 is online");
+    info!(%address, "DragonForge Asset Vault Phase 14 is online");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
