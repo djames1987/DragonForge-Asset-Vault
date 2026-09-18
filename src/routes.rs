@@ -2,12 +2,14 @@ use crate::{
     db,
     package,
     licensing,
+    semantic,
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, CreateProjectRequest, DeleteResponse, HealthResponse,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
-        UpdateAssetRequest, UpdateProjectRequest, UploadMetadata, UploadResponse,
+        SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, UpdateAssetRequest,
+        UpdateProjectRequest, UploadMetadata, UploadResponse,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
@@ -21,7 +23,7 @@ use axum::{
     Json, Router,
 };
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -32,6 +34,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub db: SqlitePool,
     pub storage: Storage,
+    pub semantic: crate::config::SemanticConfig,
 }
 
 pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
@@ -39,6 +42,9 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/health", get(health))
         .route("/api/stats", get(stats))
         .route("/api/licenses/presets", get(license_presets))
+        .route("/api/search/semantic", get(semantic_search))
+        .route("/api/search/semantic/status", get(semantic_status))
+        .route("/api/search/semantic/reindex", axum::routing::post(reindex_all_semantic))
         .route("/api/assets", get(list_assets).post(upload_asset))
         .route(
             "/api/assets/:id",
@@ -46,6 +52,7 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         )
         .route("/api/assets/:id/download", get(download_asset))
         .route("/api/assets/:id/license-status", get(asset_license_status))
+        .route("/api/assets/:id/semantic-index", axum::routing::post(reindex_asset_semantic))
         .route("/api/assets/:id/thumbnail", get(asset_thumbnail))
         .route("/api/assets/:id/preview", get(asset_preview))
         .route("/api/assets/:id/restore", axum::routing::post(restore_asset))
@@ -97,6 +104,200 @@ async fn health() -> Json<HealthResponse> {
         phase: 8,
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn semantic_status(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<impl IntoResponse> {
+    let assets = db::list_all_active_assets(&state.db).await?;
+    let mut indexed = 0i64;
+    let mut stale = 0i64;
+    for asset in &assets {
+        if let Some(row) = db::get_semantic_embedding(&state.db, &asset.row.id).await? {
+            let document = semantic::asset_document(asset);
+            if row.model == state.semantic.model
+                && row.document_hash == semantic::document_hash(&document)
+            {
+                indexed += 1;
+            } else {
+                stale += 1;
+            }
+        }
+    }
+    let reachable = semantic::ollama_reachable(&state.semantic).await;
+    let last_error = if !state.semantic.enabled {
+        Some("Semantic search is disabled in DragonForge.toml".to_string())
+    } else if !reachable {
+        Some(format!(
+            "Ollama is not reachable at {} or the service is unavailable",
+            state.semantic.ollama_url
+        ))
+    } else {
+        None
+    };
+    Ok(Json(semantic::status(
+        &state.semantic,
+        reachable,
+        indexed,
+        assets.len() as i64,
+        stale,
+        last_error,
+    )))
+}
+
+async fn semantic_search(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SemanticSearchQuery>,
+) -> AppResult<impl IntoResponse> {
+    let q = query.q.trim();
+    if q.is_empty() {
+        return Err(AppError::BadRequest("semantic search query cannot be empty".to_string()));
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(50)
+        .clamp(1, state.semantic.max_results.max(1));
+    let assets = db::list_all_active_assets(&state.db).await?;
+    let embeddings = db::list_semantic_embeddings(&state.db, &state.semantic.model).await?;
+    let embedding_map = embeddings
+        .into_iter()
+        .map(|row| (row.asset_id.clone(), row))
+        .collect::<HashMap<_, _>>();
+
+    let query_embedding = match semantic::embed_text(&state.semantic, q).await {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(error = %err, query = %q, "semantic search fell back to keyword ranking");
+            let results = semantic::fallback_results(q, assets, limit);
+            return Ok(Json(SemanticSearchResponse {
+                query: q.to_string(),
+                mode: "keyword_fallback".to_string(),
+                model: state.semantic.model.clone(),
+                indexed_assets: embedding_map.len() as i64,
+                results,
+            }));
+        }
+    };
+
+    let mut results = Vec::new();
+    let mut valid_indexed = 0i64;
+    for asset in assets {
+        let keyword = semantic::keyword_score(&asset, q);
+        let mut semantic_score = 0.0f32;
+
+        if let Some(row) = embedding_map.get(&asset.row.id) {
+            let document = semantic::asset_document(&asset);
+            if row.document_hash == semantic::document_hash(&document) {
+                if let Ok(vector) = serde_json::from_str::<Vec<f32>>(&row.embedding_json) {
+                    if vector.len() == query_embedding.len() {
+                        semantic_score = semantic::cosine_similarity(&query_embedding, &vector);
+                        valid_indexed += 1;
+                    }
+                }
+            }
+        }
+
+        if semantic_score != 0.0 || keyword > 0.0 {
+            results.push(SemanticSearchResult {
+                asset,
+                semantic_score,
+                keyword_score: keyword,
+                combined_score: 0.0,
+            });
+        }
+    }
+
+    let results = semantic::combine_results(&state.semantic, results, limit);
+    info!(
+        query = %q,
+        results = results.len(),
+        indexed_assets = valid_indexed,
+        model = %state.semantic.model,
+        "semantic search completed"
+    );
+    Ok(Json(SemanticSearchResponse {
+        query: q.to_string(),
+        mode: "hybrid".to_string(),
+        model: state.semantic.model.clone(),
+        indexed_assets: valid_indexed,
+        results,
+    }))
+}
+
+async fn reindex_all_semantic(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<impl IntoResponse> {
+    if !state.semantic.enabled {
+        return Err(AppError::BadRequest("semantic search is disabled".to_string()));
+    }
+
+    let assets = db::list_all_active_assets(&state.db).await?;
+    let requested = assets.len();
+    let mut indexed = 0usize;
+    let mut failures = Vec::new();
+
+    for asset in assets {
+        let document = semantic::asset_document(&asset);
+        let hash = semantic::document_hash(&document);
+        match semantic::embed_text(&state.semantic, &document).await {
+            Ok(embedding) => {
+                if let Err(err) = db::upsert_semantic_embedding(
+                    &state.db,
+                    &asset.row.id,
+                    &state.semantic.model,
+                    &hash,
+                    &embedding,
+                )
+                .await
+                {
+                    failures.push(format!("{}: {}", asset.row.name, err));
+                } else {
+                    indexed += 1;
+                }
+            }
+            Err(err) => failures.push(format!("{}: {}", asset.row.name, err)),
+        }
+    }
+
+    info!(
+        requested,
+        indexed,
+        failed = failures.len(),
+        model = %state.semantic.model,
+        "semantic reindex completed"
+    );
+    Ok(Json(semantic::reindex_response(
+        state.semantic.model.clone(),
+        requested,
+        indexed,
+        failures,
+    )))
+}
+
+async fn reindex_asset_semantic(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let asset = db::get_asset(&state.db, &id, false).await?;
+    let document = semantic::asset_document(&asset);
+    let hash = semantic::document_hash(&document);
+    let embedding = semantic::embed_text(&state.semantic, &document).await?;
+    db::upsert_semantic_embedding(
+        &state.db,
+        &id,
+        &state.semantic.model,
+        &hash,
+        &embedding,
+    )
+    .await?;
+    info!(asset_id = %id, model = %state.semantic.model, "asset semantic index updated");
+    Ok(Json(semantic::reindex_response(
+        state.semantic.model.clone(),
+        1,
+        1,
+        Vec::new(),
+    )))
 }
 
 async fn license_presets() -> Json<&'static [crate::models::LicensePreset]> {
@@ -376,7 +577,8 @@ async fn update_asset(
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset metadata update requested");
     let asset = db::update_asset(&state.db, &id, request).await?;
-    info!(asset_id = %id, "asset metadata updated");
+    db::delete_semantic_embedding(&state.db, &id).await?;
+    info!(asset_id = %id, "asset metadata updated; semantic index invalidated");
     Ok(Json(asset))
 }
 
@@ -386,7 +588,8 @@ async fn delete_asset(
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset soft delete requested");
     db::soft_delete(&state.db, &id).await?;
-    info!(asset_id = %id, "asset soft deleted");
+    db::delete_semantic_embedding(&state.db, &id).await?;
+    info!(asset_id = %id, "asset soft deleted; semantic index removed");
     Ok(Json(DeleteResponse { id, deleted: true }))
 }
 
@@ -947,7 +1150,8 @@ async fn restore_asset(
 ) -> AppResult<impl IntoResponse> {
     info!(asset_id = %id, "asset restore requested");
     db::restore_asset(&state.db, &id).await?;
-    info!(asset_id = %id, "asset restored");
+    db::delete_semantic_embedding(&state.db, &id).await?;
+    info!(asset_id = %id, "asset restored; semantic reindex required");
     Ok(Json(RestoreResponse { id, restored: true }))
 }
 
