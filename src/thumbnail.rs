@@ -54,9 +54,10 @@ pub async fn get_or_create_preview(
     let destination_for_worker = destination.clone();
     let asset_id = asset.id.clone();
     let extension = asset.extension.clone().unwrap_or_default();
+    let extension_for_worker = extension.clone();
 
     tokio::task::spawn_blocking(move || {
-        generate_preview(&source, &destination_for_worker, &extension)
+        generate_preview(&source, &destination_for_worker, &extension_for_worker)
     })
     .await
     .map_err(|err| AppError::Other(anyhow::anyhow!("preview worker failed: {err}")))??;
