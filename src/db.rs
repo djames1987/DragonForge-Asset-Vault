@@ -360,6 +360,14 @@ pub async fn checkout_asset(
     })
 }
 
+pub async fn clear_asset_checkout(pool: &SqlitePool, asset_id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM asset_checkouts WHERE asset_id = ?")
+        .bind(asset_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn release_asset_checkout(
     pool: &SqlitePool,
     asset_id: &str,
