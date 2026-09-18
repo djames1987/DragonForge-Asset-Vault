@@ -222,3 +222,8 @@ so removed project assets disappear from attribution output automatically.
 7. Check in from client A.
 8. Repeat the mutation from client B; it should now succeed.
 9. Send client/server logs for Phase 12 validation.
+
+
+## Phase 12.1 UI maintenance
+
+Runtime testing exposed that the right-side Asset Details panel could exceed the available window height with no scrolling. The panel is now wrapped in a persistent vertical scroll area, so all checkout, metadata, version, project, and removal controls remain reachable regardless of window height.
