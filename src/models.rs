@@ -204,3 +204,53 @@ pub struct PackageVersionResponse {
     pub asset: Asset,
     pub manifest: PackageManifest,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseStatus {
+    Complete,
+    Warning,
+    Unknown,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LicenseAssessment {
+    pub status: LicenseStatus,
+    pub license_id: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LicensePreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub attribution_required: bool,
+    pub license_url: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectLicenseEntry {
+    pub asset_id: String,
+    pub asset_name: String,
+    pub version_number: i64,
+    pub license_id: String,
+    pub status: LicenseStatus,
+    pub creator: Option<String>,
+    pub source_url: Option<String>,
+    pub attribution_required: bool,
+    pub warnings: Vec<String>,
+    pub credit_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectLicenseReport {
+    pub project_id: String,
+    pub generated_at: String,
+    pub entries: Vec<ProjectLicenseEntry>,
+    pub warning_count: usize,
+    pub unknown_count: usize,
+    pub credits_text: String,
+    pub csv_manifest: String,
+}
