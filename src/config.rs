@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub semantic: SemanticConfig,
+    #[serde(default)]
+    pub backup: BackupConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,16 @@ pub struct DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BackupConfig {
+    #[serde(default = "default_backup_dir")]
+    pub directory: PathBuf,
+    #[serde(default)]
+    pub replication_targets: Vec<PathBuf>,
+    #[serde(default = "default_backup_keep")]
+    pub keep: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct SemanticConfig {
     #[serde(default = "default_semantic_enabled")]
     pub enabled: bool,
@@ -58,6 +70,7 @@ impl Default for AppConfig {
             storage: StorageConfig::default(),
             database: DatabaseConfig::default(),
             semantic: SemanticConfig::default(),
+            backup: BackupConfig::default(),
         }
     }
 }
@@ -125,3 +138,17 @@ fn default_embedding_model() -> String { "nomic-embed-text".to_string() }
 fn default_semantic_weight() -> f32 { 0.70 }
 fn default_keyword_weight() -> f32 { 0.30 }
 fn default_semantic_limit() -> usize { 100 }
+
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_backup_dir(),
+            replication_targets: Vec::new(),
+            keep: default_backup_keep(),
+        }
+    }
+}
+
+fn default_backup_dir() -> PathBuf { PathBuf::from("./backups") }
+fn default_backup_keep() -> usize { 10 }
