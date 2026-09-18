@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 9 — Local AI Semantic Search**
+**Phase 10 — Verified Backup & Replication**
 
 ### Server
 
@@ -27,6 +27,8 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - persistent action logs
 - local Ollama semantic embedding index
 - hybrid semantic + keyword search with offline fallback
+- verified vault snapshots with SHA-256 manifests
+- configurable retention and replication targets
 
 ### Desktop client
 
@@ -46,9 +48,10 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - manual **Refresh Credits / License Manifest**
 - Smart / Keyword search modes
 - AI index status and one-click reindex
+- one-click Create Backup / Verify Latest controls
 - persistent daily logs
 
-See `docs/PHASE_1.md` through `docs/PHASE_9.md`.
+See `docs/PHASE_1.md` through `docs/PHASE_10.md`.
 
 ## Quick start
 
@@ -113,3 +116,32 @@ ollama pull nomic-embed-text
 Then start DragonForge and click **Reindex AI Search** in the desktop client.
 
 Smart Search automatically falls back to keyword ranking if Ollama is unavailable. See `docs/PHASE_9.md` and `DragonForge.example.toml` for configuration.
+
+
+## Phase 10 backup setup
+
+By default, DragonForge writes verified backups to `./backups` and keeps the 10 newest snapshots.
+
+A backup contains:
+
+```text
+dragonforge-<timestamp>/
+├── manifest.json
+├── database/
+│   └── dragonforge.db
+├── assets/
+└── previews/
+```
+
+Every manifest entry contains a SHA-256 hash and byte size. Backups are verified after creation before they are considered complete.
+
+Optional replication targets can be configured in `DragonForge.toml`:
+
+```toml
+[backup]
+directory = "./backups"
+keep = 10
+replication_targets = ["D:/DragonForge-Backup"]
+```
+
+The backup directory must be outside the live DragonForge data directory.
