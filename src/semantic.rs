@@ -230,3 +230,20 @@ pub fn reindex_response(
         failures,
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_similarity_identical_vectors_is_one() {
+        let score = cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]);
+        assert!((score - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn cosine_similarity_rejects_mismatched_dimensions() {
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
+    }
+}
