@@ -1184,7 +1184,16 @@ impl DragonForgeClient {
         info!(asset_id = %asset_id, project_id = %project_id, "remove from project started");
 
         thread::spawn(move || {
-            let result = project_sync::remove_asset(&base, &project, &asset);
+            let result = project_sync::remove_asset(&base, &project, &asset).map(|message| {
+                match write_project_license_files(&base, &project) {
+                    Ok((_path, warnings, unknown)) => format!(
+                        "{message} License files refreshed ({warnings} warnings, {unknown} unknown)."
+                    ),
+                    Err(err) => format!(
+                        "{message} Warning: license files could not be refreshed automatically: {err}"
+                    ),
+                }
+            });
             let _ = tx.send(ClientEvent::ProjectAssetRemoved {
                 project_id,
                 asset_id,
@@ -2704,7 +2713,7 @@ impl eframe::App for DragonForgeClient {
                 ui.separator();
                 ui.label(format!("{} projects", self.projects.len()));
                 ui.separator();
-                ui.label("DragonForge Client Phase 11");
+                ui.label("DragonForge Client Phase 11.1");
                 ui.separator();
                 ui.label(format!("Logs: {}", client_log_dir().display()));
             });
