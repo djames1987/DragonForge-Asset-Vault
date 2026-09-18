@@ -722,17 +722,54 @@ impl DragonForgeClient {
         app
     }
 
+    fn accent() -> egui::Color32 {
+        egui::Color32::from_rgb(255, 138, 42)
+    }
+
+    fn bg() -> egui::Color32 {
+        egui::Color32::from_rgb(11, 14, 20)
+    }
+
+    fn panel_bg() -> egui::Color32 {
+        egui::Color32::from_rgb(16, 20, 29)
+    }
+
+    fn raised_bg() -> egui::Color32 {
+        egui::Color32::from_rgb(23, 28, 39)
+    }
+
+    fn muted_text() -> egui::Color32 {
+        egui::Color32::from_rgb(141, 154, 181)
+    }
+
     fn apply_phase16_style(&self, ctx: &egui::Context) {
         ctx.set_pixels_per_point(self.settings.ui_scale.clamp(0.85, 1.5));
-        if self.settings.dark_mode {
-            ctx.set_visuals(egui::Visuals::dark());
+
+        let mut visuals = if self.settings.dark_mode {
+            egui::Visuals::dark()
         } else {
-            ctx.set_visuals(egui::Visuals::light());
+            egui::Visuals::light()
+        };
+
+        if self.settings.dark_mode {
+            visuals.panel_fill = Self::bg();
+            visuals.window_fill = Self::panel_bg();
+            visuals.extreme_bg_color = egui::Color32::from_rgb(8, 11, 17);
+            visuals.faint_bg_color = Self::panel_bg();
+            visuals.widgets.noninteractive.bg_fill = Self::panel_bg();
+            visuals.widgets.inactive.bg_fill = Self::raised_bg();
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(35, 41, 55);
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(45, 50, 64);
+            visuals.selection.bg_fill = egui::Color32::from_rgb(61, 42, 28);
+            visuals.selection.stroke.color = Self::accent();
+            visuals.hyperlink_color = Self::accent();
         }
+
+        ctx.set_visuals(visuals);
         ctx.style_mut(|style| {
-            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-            style.spacing.button_padding = egui::vec2(12.0, 7.0);
-            style.spacing.interact_size.y = 30.0;
+            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+            style.spacing.button_padding = egui::vec2(14.0, 9.0);
+            style.spacing.interact_size.y = 34.0;
         });
     }
 
@@ -752,27 +789,75 @@ impl DragonForgeClient {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading("DRAGONFORGE");
-        ui.small("Asset Vault");
-        ui.add_space(14.0);
+        ui.add_space(12.0);
 
-        let nav = |ui: &mut egui::Ui, current: AppView, target: AppView, label: &str| {
-            ui.selectable_label(current == target, label).clicked()
-        };
+        ui.horizontal(|ui| {
+            let logo = egui::Button::new(
+                egui::RichText::new("DF")
+                    .strong()
+                    .color(egui::Color32::BLACK),
+            )
+            .fill(Self::accent());
+            ui.add_sized([44.0, 44.0], logo);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("DragonForge").size(21.0).strong());
+                ui.label(egui::RichText::new("Asset Vault").color(Self::muted_text()));
+            });
+        });
 
-        ui.label(egui::RichText::new("LIBRARY").small().strong());
-        if nav(ui, self.current_view, AppView::Library, "▦  Assets") {
-            self.deleted_only = false;
-            self.navigate(AppView::Library);
-        }
+        ui.add_space(20.0);
         if ui
-            .selectable_label(
-                self.current_view == AppView::Library && self.deleted_only,
-                "♲  Recycle Bin",
+            .add_enabled(
+                self.can_write(),
+                egui::Button::new(
+                    egui::RichText::new("+  Add Asset")
+                        .strong()
+                        .color(egui::Color32::BLACK),
+                )
+                .fill(Self::accent())
+                .min_size(egui::vec2(ui.available_width(), 42.0)),
             )
             .clicked()
         {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Select an asset to add")
+                .pick_file()
+            {
+                self.begin_upload(path);
+            }
+        }
+
+        ui.add_space(18.0);
+        ui.label(
+            egui::RichText::new("LIBRARY")
+                .size(10.0)
+                .strong()
+                .color(Self::muted_text()),
+        );
+
+        let nav_button = |ui: &mut egui::Ui, selected: bool, label: &str| {
+            let mut button = egui::Button::new(label)
+                .min_size(egui::vec2(ui.available_width(), 36.0));
+            if selected {
+                button = button.fill(egui::Color32::from_rgb(55, 38, 27));
+            }
+            ui.add(button).clicked()
+        };
+
+        if nav_button(
+            ui,
+            self.current_view == AppView::Library && !self.deleted_only,
+            "▦   All Assets",
+        ) {
+            self.deleted_only = false;
+            self.navigate(AppView::Library);
+        }
+
+        if nav_button(
+            ui,
+            self.current_view == AppView::Library && self.deleted_only,
+            "♲   Recycle Bin",
+        ) {
             self.deleted_only = true;
             self.selected_id = None;
             self.current_view = AppView::Library;
@@ -781,48 +866,78 @@ impl DragonForgeClient {
             self.refresh_assets();
         }
 
-        ui.add_space(12.0);
-        ui.label(egui::RichText::new("WORKSPACE").small().strong());
-        if nav(ui, self.current_view, AppView::Projects, "▣  Projects") {
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("WORKSPACE")
+                .size(10.0)
+                .strong()
+                .color(Self::muted_text()),
+        );
+
+        if nav_button(ui, self.current_view == AppView::Projects, "▣   Projects") {
             self.navigate(AppView::Projects);
         }
-        if nav(ui, self.current_view, AppView::Activity, "≋  Activity") {
+        if nav_button(ui, self.current_view == AppView::Activity, "≋   Activity") {
             self.navigate(AppView::Activity);
         }
 
-        ui.add_space(12.0);
-        ui.label(egui::RichText::new("SYSTEM").small().strong());
-        if nav(ui, self.current_view, AppView::Backups, "◫  Backups") {
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("TOOLS")
+                .size(10.0)
+                .strong()
+                .color(Self::muted_text()),
+        );
+
+        if nav_button(ui, self.current_view == AppView::Backups, "◫   Backups") {
             self.navigate(AppView::Backups);
         }
-        if nav(ui, self.current_view, AppView::AiSearch, "✦  AI Search") {
+        if nav_button(ui, self.current_view == AppView::AiSearch, "✦   AI Search") {
             self.navigate(AppView::AiSearch);
         }
-        if self.is_admin() && nav(ui, self.current_view, AppView::Users, "♙  Users") {
+        if self.is_admin()
+            && nav_button(ui, self.current_view == AppView::Users, "♙   Users")
+        {
             self.navigate(AppView::Users);
         }
-        if nav(ui, self.current_view, AppView::Settings, "⚙  Settings") {
+        if nav_button(ui, self.current_view == AppView::Settings, "⚙   Settings") {
             self.navigate(AppView::Settings);
         }
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            let role = self
-                .auth_me
-                .as_ref()
-                .and_then(|me| me.role.as_ref())
-                .map(UserRole::label)
-                .unwrap_or("Offline");
-            let user = self
-                .auth_me
-                .as_ref()
-                .and_then(|me| me.username.as_deref())
-                .unwrap_or("Not connected");
-            ui.small(format!("{user} · {role}"));
-            ui.small(match &self.health {
-                Some(h) if h.ok => format!("● Connected · v{}", h.version),
-                _ => "○ Disconnected".to_string(),
-            });
-            ui.separator();
+            egui::Frame::group(ui.style())
+                .fill(Self::raised_bg())
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let connected = self.health.as_ref().is_some_and(|health| health.ok);
+                    ui.label(
+                        egui::RichText::new(if connected {
+                            "✓  Server connected"
+                        } else {
+                            "○  Server offline"
+                        })
+                        .strong()
+                        .color(if connected {
+                            egui::Color32::from_rgb(78, 214, 150)
+                        } else {
+                            Self::muted_text()
+                        }),
+                    );
+
+                    let user = self
+                        .auth_me
+                        .as_ref()
+                        .and_then(|me| me.username.as_deref())
+                        .unwrap_or("Not signed in");
+                    let role = self
+                        .auth_me
+                        .as_ref()
+                        .and_then(|me| me.role.as_ref())
+                        .map(UserRole::label)
+                        .unwrap_or("Offline");
+                    ui.small(format!("{user} · {role}"));
+                });
+            ui.add_space(8.0);
         });
     }
 
@@ -2722,112 +2837,124 @@ impl DragonForgeClient {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        if self.current_view == AppView::Library {
+            return;
+        }
+
         ui.horizontal(|ui| {
-            ui.heading(self.current_view.label());
-            ui.add_space(8.0);
-
-            if self.current_view == AppView::Library {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .desired_width(330.0)
-                        .hint_text("Search assets, creators, tags, licenses..."),
-                );
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.refresh_assets();
-                }
-                if ui.button("Search").clicked() {
-                    self.refresh_assets();
-                }
-                if ui
-                    .selectable_label(self.settings.show_filters, "Filters")
-                    .clicked()
-                {
-                    self.settings.show_filters = !self.settings.show_filters;
-                    let _ = save_settings(&self.settings);
-                }
-            }
-
+            ui.heading(egui::RichText::new(self.current_view.label()).size(23.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.busy_count > 0 {
                     ui.spinner();
                 }
                 if ui.button("Refresh").clicked() {
                     match self.current_view {
-                        AppView::Library => self.refresh_assets(),
                         AppView::Projects => self.refresh_projects(),
                         AppView::Activity => self.refresh_activity(),
                         AppView::Backups => self.refresh_backup_status(),
                         AppView::AiSearch => self.refresh_semantic_status(),
                         AppView::Users => self.refresh_users(),
                         AppView::Settings => self.check_server(),
+                        AppView::Library => {}
                     }
                 }
-                let connection = match &self.health {
-                    Some(h) if h.ok => format!("● v{}", h.version),
-                    _ => "○ Offline".to_string(),
-                };
-                ui.label(connection);
             });
         });
     }
 
     fn filter_bar(&mut self, ui: &mut egui::Ui) {
-        let can_write = self.can_write();
-
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(can_write, egui::Button::new("+ Add Asset")).clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Select an asset to add")
-                    .pick_file()
+        ui.horizontal(|ui| {
+            ui.heading(
+                egui::RichText::new(if self.deleted_only {
+                    "Recycle Bin"
+                } else {
+                    "All Assets"
+                })
+                .size(22.0)
+                .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        self.can_write(),
+                        egui::Button::new(
+                            egui::RichText::new("+")
+                                .size(20.0)
+                                .color(Self::accent()),
+                        ),
+                    )
+                    .on_hover_text("Import a multi-file package ZIP")
+                    .clicked()
                 {
-                    self.begin_upload(path);
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Select a multi-file asset ZIP")
+                        .add_filter("ZIP package", &["zip"])
+                        .pick_file()
+                    {
+                        self.begin_package_import(path);
+                    }
                 }
-            }
-            if ui
-                .add_enabled(can_write, egui::Button::new("+ Package ZIP"))
-                .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Select a multi-file asset ZIP")
-                    .add_filter("ZIP package", &["zip"])
-                    .pick_file()
-                {
-                    self.begin_package_import(path);
-                }
-            }
+            });
+        });
+        ui.label(
+            egui::RichText::new(format!("{} assets", self.assets.len()))
+                .color(Self::muted_text()),
+        );
+        ui.add_space(10.0);
 
-            ui.separator();
-            egui::ComboBox::from_id_salt("phase16_search_mode")
+        let search = ui.add_sized(
+            [ui.available_width(), 42.0],
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("⌕   Search your asset vault"),
+        );
+        if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.refresh_assets();
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("phase161_search_mode")
                 .selected_text(format!("{} Search", self.search_mode))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.search_mode, "Smart".to_string(), "Smart Search");
                     ui.selectable_value(&mut self.search_mode, "Keyword".to_string(), "Keyword Search");
                 });
 
-            ui.separator();
-            ui.label(format!("{} shown", self.assets.len()));
-            if self.deleted_only {
-                ui.label(egui::RichText::new("RECYCLE BIN").strong());
+            if ui
+                .selectable_label(self.settings.show_filters, "Filters")
+                .clicked()
+            {
+                self.settings.show_filters = !self.settings.show_filters;
+                let _ = save_settings(&self.settings);
+            }
+            if ui.button("Search").clicked() {
+                self.refresh_assets();
             }
         });
 
         if self.settings.show_filters {
+            ui.add_space(8.0);
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Category");
-                    ui.add(egui::TextEdit::singleline(&mut self.category_filter).desired_width(120.0));
-                    ui.label("Tag");
-                    ui.add(egui::TextEdit::singleline(&mut self.tag_filter).desired_width(120.0));
+                ui.label("Category");
+                ui.add(egui::TextEdit::singleline(&mut self.category_filter).hint_text("e.g. texture"));
+                ui.label("Tag");
+                ui.add(egui::TextEdit::singleline(&mut self.tag_filter).hint_text("e.g. wood"));
+                ui.horizontal(|ui| {
                     ui.label("Type");
-                    ui.add(egui::TextEdit::singleline(&mut self.extension_filter).desired_width(80.0));
-                    ui.label("License");
-                    egui::ComboBox::from_id_salt("phase16_license_filter")
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.extension_filter)
+                            .desired_width(70.0)
+                            .hint_text("obj"),
+                    );
+                    egui::ComboBox::from_id_salt("phase161_license")
                         .selected_text(&self.license_filter)
                         .show_ui(ui, |ui| {
                             for value in ["All", "Complete", "Warning", "Unknown", "Custom"] {
                                 ui.selectable_value(&mut self.license_filter, value.to_string(), value);
                             }
                         });
+                });
+                ui.horizontal(|ui| {
                     if ui.button("Apply").clicked() {
                         self.refresh_assets();
                     }
@@ -2844,73 +2971,96 @@ impl DragonForgeClient {
     }
 
     fn asset_grid(&mut self, ui: &mut egui::Ui) {
-        let card_width = self.settings.card_width.clamp(170.0, 300.0);
-        let columns = ((ui.available_width() + 12.0) / (card_width + 12.0))
-            .floor()
-            .max(1.0) as usize;
-        let preview_height = card_width * 0.58;
         let mut chosen: Option<String> = None;
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("phase16_asset_grid")
-                .num_columns(columns)
-                .spacing([12.0, 12.0])
-                .show(ui, |ui| {
-                    for (index, asset) in self.assets.iter().enumerate() {
-                        let selected = self.selected_id.as_deref() == Some(asset.id.as_str());
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_width(card_width);
-                            if let Some(texture) = self.thumbnails.get(&asset.id) {
-                                ui.image((texture.id(), egui::vec2(card_width - 16.0, preview_height)));
-                            } else {
-                                let placeholder = match asset.extension.as_deref() {
-                                    Some("fbx") | Some("obj") | Some("glb") | Some("gltf") | Some("blend") => "3D MODEL",
-                                    Some("wav") | Some("mp3") | Some("ogg") => "AUDIO",
-                                    Some("zip") | Some("7z") => "ARCHIVE",
-                                    _ => "ASSET",
-                                };
-                                ui.add_sized(
-                                    [card_width - 16.0, preview_height],
-                                    egui::Label::new(egui::RichText::new(placeholder).strong()).selectable(false),
-                                );
-                            }
+        egui::ScrollArea::vertical()
+            .id_salt("phase161_asset_list")
+            .show(ui, |ui| {
+                for asset in &self.assets {
+                    let selected = self.selected_id.as_deref() == Some(asset.id.as_str());
+                    let fill = if selected {
+                        egui::Color32::from_rgb(43, 34, 29)
+                    } else {
+                        Self::panel_bg()
+                    };
 
-                            let name = if selected {
-                                egui::RichText::new(&asset.name).strong()
-                            } else {
-                                egui::RichText::new(&asset.name)
-                            };
-                            if ui
-                                .add_sized([card_width - 16.0, 32.0], egui::Button::new(name).selected(selected))
-                                .clicked()
-                            {
-                                chosen = Some(asset.id.clone());
-                            }
+                    let response = egui::Frame::group(ui.style())
+                        .fill(fill)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
 
-                            let ext = asset.extension.as_deref().unwrap_or("file").to_ascii_uppercase();
-                            ui.small(format!("{}  ·  {}  ·  v{}", ext, human_size(asset.byte_size), asset.current_version));
+                            ui.horizontal(|ui| {
+                                let thumb_size = egui::vec2(58.0, 58.0);
+                                if let Some(texture) = self.thumbnails.get(&asset.id) {
+                                    ui.image((texture.id(), thumb_size));
+                                } else {
+                                    let ext = asset
+                                        .extension
+                                        .as_deref()
+                                        .unwrap_or("FILE")
+                                        .to_ascii_uppercase();
+                                    ui.add_sized(
+                                        thumb_size,
+                                        egui::Label::new(
+                                            egui::RichText::new(ext).strong().color(Self::muted_text()),
+                                        ),
+                                    );
+                                }
 
-                            ui.horizontal_wrapped(|ui| {
-                                ui.small(asset.category.as_deref().unwrap_or("Uncategorized"));
-                                if let Some(Some(checkout)) = self.checkout_status.get(&asset.id) {
-                                    ui.small(format!("● {}", checkout.holder));
-                                }
-                                if self.storage_tiers.get(&asset.id).is_some_and(|status| status.tier == "archive") {
-                                    ui.small("ARCHIVED");
-                                }
-                                let license = license_status_label(asset);
-                                if license != "Complete" {
-                                    ui.small(format!("⚠ {license}"));
-                                }
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&asset.name)
+                                            .size(15.0)
+                                            .strong()
+                                            .color(if selected {
+                                                Self::accent()
+                                            } else {
+                                                egui::Color32::WHITE
+                                            }),
+                                    );
+
+                                    let ext = asset
+                                        .extension
+                                        .as_deref()
+                                        .unwrap_or("file")
+                                        .to_ascii_uppercase();
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} · {} · v{}",
+                                            ext,
+                                            human_size(asset.byte_size),
+                                            asset.current_version
+                                        ))
+                                        .color(Self::muted_text()),
+                                    );
+
+                                    let mut metadata = asset
+                                        .category
+                                        .clone()
+                                        .unwrap_or_else(|| "Uncategorized".to_string());
+                                    if let Some(Some(checkout)) = self.checkout_status.get(&asset.id) {
+                                        metadata.push_str(&format!(" · checked out by {}", checkout.holder));
+                                    }
+                                    if self
+                                        .storage_tiers
+                                        .get(&asset.id)
+                                        .is_some_and(|status| status.tier == "archive")
+                                    {
+                                        metadata.push_str(" · ARCHIVED");
+                                    }
+                                    ui.small(metadata);
+                                });
                             });
-                        });
+                        })
+                        .response
+                        .interact(egui::Sense::click());
 
-                        if (index + 1) % columns == 0 {
-                            ui.end_row();
-                        }
+                    if response.clicked() {
+                        chosen = Some(asset.id.clone());
                     }
-                });
-        });
+                    ui.add_space(6.0);
+                }
+            });
 
         if let Some(id) = chosen {
             info!(asset_id = %id, "asset selected");
@@ -2922,86 +3072,195 @@ impl DragonForgeClient {
 
     fn details_panel(&mut self, ui: &mut egui::Ui) {
         let can_write = self.can_write();
+
         let Some(asset) = self.selected_asset().cloned() else {
-            ui.heading("Inspector");
-            ui.add_space(12.0);
-            ui.label("Select an asset to inspect its metadata, versions, collaboration state, projects, and storage.");
+            ui.with_layout(
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.add_space(180.0);
+                    ui.label(
+                        egui::RichText::new("⌘")
+                            .size(44.0)
+                            .color(egui::Color32::from_rgb(75, 92, 126)),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Select an asset").size(22.0).strong());
+                    ui.label(
+                        egui::RichText::new(
+                            "Choose something from your asset vault to inspect its details and preview.",
+                        )
+                        .color(Self::muted_text()),
+                    );
+                },
+            );
             return;
         };
 
-        if let Some(texture) = self.thumbnails.get(&asset.id) {
-            let width = ui.available_width().min(360.0);
-            ui.image((texture.id(), egui::vec2(width, width * 0.62)));
-        }
-        ui.heading(&asset.name);
-        ui.small(&asset.original_filename);
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("v{}", asset.current_version));
-            ui.label(asset.extension.as_deref().unwrap_or("file").to_ascii_uppercase());
-            ui.label(human_size(asset.byte_size));
-            if asset.deleted_at.is_some() {
-                ui.label(egui::RichText::new("RECYCLE BIN").strong());
-            }
-            if self.storage_tiers.get(&asset.id).is_some_and(|status| status.tier == "archive") {
-                ui.label(egui::RichText::new("ARCHIVED").strong());
-            } else {
-                ui.label("HOT");
-            }
-        });
-        ui.separator();
-
-        egui::CollapsingHeader::new("General")
-            .default_open(true)
+        egui::ScrollArea::vertical()
+            .id_salt("phase161_detail_scroll")
             .show(ui, |ui| {
-                ui.label(format!("Category: {}", asset.category.as_deref().unwrap_or("Uncategorized")));
-                ui.label(format!("Creator: {}", asset.creator.as_deref().unwrap_or("Unknown")));
-                ui.label(format!("License: {}", asset.license.as_deref().unwrap_or("Not recorded")));
-                ui.label(format!("License status: {}", license_status_label(&asset)));
-                if let Some(description) = &asset.description {
-                    ui.add_space(4.0);
+                ui.heading(egui::RichText::new(&asset.name).size(25.0).strong());
+                ui.label(
+                    egui::RichText::new(&asset.original_filename)
+                        .color(Self::muted_text()),
+                );
+                ui.add_space(12.0);
+
+                if let Some(texture) = self.thumbnails.get(&asset.id) {
+                    let max_width = ui.available_width().min(720.0);
+                    let size = egui::vec2(max_width, (max_width * 0.55).min(410.0));
+                    ui.image((texture.id(), size));
+                } else {
+                    egui::Frame::group(ui.style())
+                        .fill(Self::panel_bg())
+                        .show(ui, |ui| {
+                            ui.set_min_size(egui::vec2(ui.available_width(), 260.0));
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        asset.extension.as_deref().unwrap_or("ASSET").to_ascii_uppercase(),
+                                    )
+                                    .size(28.0)
+                                    .strong()
+                                    .color(Self::muted_text()),
+                                );
+                            });
+                        });
+                }
+
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Download").clicked() {
+                        self.download_selected();
+                    }
+
+                    let (identity_user, identity_workstation) = self.checkout_identity();
+                    match self.checkout_status.get(&asset.id) {
+                        Some(Some(checkout))
+                            if checkout.holder == identity_user
+                                && checkout.workstation == identity_workstation =>
+                        {
+                            if ui
+                                .add_enabled(can_write, egui::Button::new("Check In"))
+                                .clicked()
+                            {
+                                self.checkin_selected();
+                            }
+                        }
+                        Some(None) => {
+                            if ui
+                                .add_enabled(
+                                    can_write && asset.deleted_at.is_none(),
+                                    egui::Button::new("Check Out").fill(Self::accent()),
+                                )
+                                .clicked()
+                            {
+                                self.checkout_selected();
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if ui
+                        .add_enabled(can_write, egui::Button::new("Edit Metadata"))
+                        .clicked()
+                    {
+                        self.begin_edit_selected();
+                    }
+                    if ui.button("Version History").clicked() {
+                        self.open_versions_selected();
+                    }
+                    if ui.button("Activity").clicked() {
+                        self.open_asset_activity(&asset.id);
+                    }
+                });
+
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new("GENERAL")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
+
+                egui::Grid::new("phase161_general")
+                    .num_columns(2)
+                    .spacing([26.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Category").color(Self::muted_text()));
+                        ui.label(asset.category.as_deref().unwrap_or("Uncategorized"));
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Creator").color(Self::muted_text()));
+                        ui.label(asset.creator.as_deref().unwrap_or("Unknown"));
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Type").color(Self::muted_text()));
+                        ui.label(asset.extension.as_deref().unwrap_or("unknown").to_ascii_uppercase());
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Size").color(Self::muted_text()));
+                        ui.label(human_size(asset.byte_size));
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Version").color(Self::muted_text()));
+                        ui.label(format!("v{}", asset.current_version));
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("License").color(Self::muted_text()));
+                        ui.label(asset.license.as_deref().unwrap_or("Not recorded"));
+                        ui.end_row();
+                    });
+
+                if let Some(description) = asset.description.as_deref().filter(|v| !v.is_empty()) {
+                    ui.add_space(12.0);
                     ui.label(description);
                 }
+
                 if !asset.tags.is_empty() {
-                    ui.add_space(4.0);
+                    ui.add_space(18.0);
+                    ui.label(
+                        egui::RichText::new("TAGS")
+                            .size(11.0)
+                            .strong()
+                            .color(Self::muted_text()),
+                    );
+                    ui.separator();
                     ui.horizontal_wrapped(|ui| {
                         for tag in &asset.tags {
-                            ui.small(format!("#{tag}"));
+                            ui.label(
+                                egui::RichText::new(format!("#{tag}"))
+                                    .color(Self::accent()),
+                            );
                         }
                     });
                 }
-                for warning in license_warnings(&asset) {
-                    ui.label(format!("⚠ {warning}"));
-                }
-            });
 
-        egui::CollapsingHeader::new("Collaboration")
-            .default_open(true)
-            .show(ui, |ui| {
-                let (identity_user, identity_workstation) = self.checkout_identity();
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new("COLLABORATION")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
+
                 match self.checkout_status.get(&asset.id) {
                     Some(Some(checkout)) => {
-                        ui.label(format!("● Checked out by {}@{}", checkout.holder, checkout.workstation));
+                        ui.label(format!(
+                            "● Checked out by {}@{}",
+                            checkout.holder, checkout.workstation
+                        ));
                         ui.small(format!("Since {}", checkout.checked_out_at));
-                        if let Some(note) = checkout.note.as_deref().filter(|n| !n.trim().is_empty()) {
-                            ui.label(note);
-                        }
-                        let mine = checkout.holder == identity_user && checkout.workstation == identity_workstation;
-                        if ui
-                            .add_enabled(mine && can_write && self.busy_count == 0, egui::Button::new("Check In"))
-                            .clicked()
-                        {
-                            self.checkin_selected();
-                        }
                     }
                     Some(None) => {
-                        ui.add(egui::TextEdit::singleline(&mut self.checkout_note).hint_text("Optional checkout note"));
-                        if ui
-                            .add_enabled(can_write && self.busy_count == 0 && asset.deleted_at.is_none(), egui::Button::new("Check Out"))
-                            .clicked()
-                        {
-                            self.checkout_selected();
-                        }
+                        ui.label("✓ Available");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.checkout_note)
+                                .hint_text("Optional checkout note")
+                                .desired_width(360.0),
+                        );
                     }
                     None => {
                         if ui.button("Load checkout status").clicked() {
@@ -3009,59 +3268,43 @@ impl DragonForgeClient {
                         }
                     }
                 }
-            });
 
-        egui::CollapsingHeader::new("Versions & Package")
-            .default_open(false)
-            .show(ui, |ui| {
-                if ui.button("Version History").clicked() {
-                    self.open_versions_selected();
-                }
-                if ui.button("Package / Dependencies").clicked() {
-                    self.open_package_contents();
-                }
-                if ui.button("Asset Activity").clicked() {
-                    self.open_asset_activity(&asset.id);
-                }
-            });
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new("STORAGE")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
 
-        egui::CollapsingHeader::new("Project")
-            .default_open(false)
-            .show(ui, |ui| {
-                let project_name = self.selected_project()
-                    .map(|project| project.name.clone())
-                    .unwrap_or_else(|| "No project selected".to_string());
-                ui.label(project_name);
-                if ui
-                    .add_enabled(can_write && self.selected_project_id.is_some() && asset.deleted_at.is_none(), egui::Button::new("Add to Project"))
-                    .clicked()
-                {
-                    self.add_selected_to_project();
-                }
-                if ui
-                    .add_enabled(can_write && self.selected_project_id.is_some(), egui::Button::new("Remove from Project"))
-                    .clicked()
-                {
-                    self.request_remove_selected_from_project();
-                }
-            });
-
-        egui::CollapsingHeader::new("Storage")
-            .default_open(false)
-            .show(ui, |ui| {
                 match self.storage_tiers.get(&asset.id).cloned() {
                     Some(status) => {
-                        ui.label(format!("Tier: {} · {} object(s)", status.tier.to_ascii_uppercase(), status.object_count));
+                        ui.label(format!(
+                            "● {} · {} object(s)",
+                            status.tier.to_ascii_uppercase(),
+                            status.object_count
+                        ));
                         if status.archive_enabled {
                             if status.tier == "archive" {
-                                if ui.add_enabled(can_write && self.busy_count == 0, egui::Button::new("Recall to Hot Storage")).clicked() {
+                                if ui
+                                    .add_enabled(
+                                        can_write && self.busy_count == 0,
+                                        egui::Button::new("Recall to Hot Storage"),
+                                    )
+                                    .clicked()
+                                {
                                     self.recall_selected();
                                 }
-                            } else if ui.add_enabled(can_write && self.busy_count == 0 && asset.deleted_at.is_none(), egui::Button::new("Archive Asset")).clicked() {
+                            } else if ui
+                                .add_enabled(
+                                    can_write && self.busy_count == 0 && asset.deleted_at.is_none(),
+                                    egui::Button::new("Archive"),
+                                )
+                                .clicked()
+                            {
                                 self.archive_selected();
                             }
-                        } else {
-                            ui.small("Archive storage is not configured.");
                         }
                     }
                     None => {
@@ -3070,27 +3313,72 @@ impl DragonForgeClient {
                         }
                     }
                 }
-                ui.small(format!("SHA-256 {}", asset.sha256));
-            });
 
-        egui::CollapsingHeader::new("Actions")
-            .default_open(true)
-            .show(ui, |ui| {
-                if asset.deleted_at.is_some() {
-                    if ui.add_enabled(can_write, egui::Button::new("Restore Asset")).clicked() {
-                        self.restore_selected();
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new("PROJECT")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
+
+                let project_name = self
+                    .selected_project()
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| "No project selected".to_string());
+                ui.label(project_name);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_write
+                                && self.selected_project_id.is_some()
+                                && asset.deleted_at.is_none(),
+                            egui::Button::new("Add to Project"),
+                        )
+                        .clicked()
+                    {
+                        self.add_selected_to_project();
                     }
-                } else {
-                    if ui.button("Download").clicked() {
-                        self.download_selected();
+                    if ui
+                        .add_enabled(
+                            can_write && self.selected_project_id.is_some(),
+                            egui::Button::new("Remove from Project"),
+                        )
+                        .clicked()
+                    {
+                        self.request_remove_selected_from_project();
                     }
-                    if ui.add_enabled(can_write, egui::Button::new("Edit Metadata")).clicked() {
-                        self.begin_edit_selected();
+                });
+
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new("MORE")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Package / Dependencies").clicked() {
+                        self.open_package_contents();
                     }
-                    if ui.add_enabled(can_write, egui::Button::new("Move to Recycle Bin")).clicked() {
+                    if asset.deleted_at.is_some() {
+                        if ui
+                            .add_enabled(can_write, egui::Button::new("Restore Asset"))
+                            .clicked()
+                        {
+                            self.restore_selected();
+                        }
+                    } else if ui
+                        .add_enabled(can_write, egui::Button::new("Move to Recycle Bin"))
+                        .clicked()
+                    {
                         self.delete_selected();
                     }
-                }
+                });
             });
     }
 
@@ -3639,7 +3927,7 @@ impl DragonForgeClient {
             let mut changed = false;
             changed |= ui.checkbox(&mut self.settings.dark_mode, "Dark mode").changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.85..=1.5).text("UI scale")).changed();
-            changed |= ui.add(egui::Slider::new(&mut self.settings.card_width, 170.0..=300.0).text("Asset card width")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.card_width, 170.0..=300.0).text("Asset list density")).changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.sidebar_width, 170.0..=280.0).text("Sidebar width")).changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.inspector_width, 280.0..=480.0).text("Inspector width")).changed();
             if changed {
@@ -3989,69 +4277,85 @@ impl eframe::App for DragonForgeClient {
         self.handle_events(ctx);
         self.process_dropped_files(ctx);
 
-        egui::SidePanel::left("phase16_sidebar")
-            .default_width(self.settings.sidebar_width)
-            .resizable(true)
+        egui::SidePanel::left("phase161_sidebar")
+            .default_width(self.settings.sidebar_width.clamp(190.0, 300.0))
+            .resizable(false)
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(Self::bg()))
             .show(ctx, |ui| self.sidebar(ui));
 
-        egui::TopBottomPanel::top("phase16_header").show(ctx, |ui| {
-            ui.add_space(4.0);
-            self.top_bar(ui);
-            if self.current_view == AppView::Library {
-                ui.separator();
-                self.filter_bar(ui);
-            }
-            ui.add_space(4.0);
-        });
-
         if self.current_view == AppView::Library {
-            egui::SidePanel::right("phase16_inspector")
-                .default_width(self.settings.inspector_width)
+            egui::SidePanel::left("phase161_asset_browser")
+                .default_width(380.0)
+                .min_width(320.0)
+                .max_width(470.0)
                 .resizable(true)
+                .frame(egui::Frame::side_top_panel(&ctx.style()).fill(Self::panel_bg()))
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("phase16_inspector_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.details_panel(ui));
-                });
-        }
+                    ui.add_space(12.0);
+                    self.filter_bar(ui);
+                    ui.add_space(10.0);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.current_view {
-                AppView::Library => {
                     if self.assets.is_empty() {
+                        ui.add_space(50.0);
                         ui.centered_and_justified(|ui| {
-                            ui.label(if self.deleted_only {
-                                "Recycle bin is empty."
-                            } else {
-                                "No matching assets. Add an asset or change the filters."
-                            });
+                            ui.label(
+                                egui::RichText::new(if self.deleted_only {
+                                    "Recycle bin is empty."
+                                } else {
+                                    "No matching assets."
+                                })
+                                .color(Self::muted_text()),
+                            );
                         });
                     } else {
                         self.asset_grid(ui);
                     }
-                }
-                AppView::Projects => self.projects_page(ui),
-                AppView::Activity => self.activity_page(ui),
-                AppView::Backups => self.backups_page(ui),
-                AppView::AiSearch => self.ai_page(ui),
-                AppView::Users => self.users_page(ui),
-                AppView::Settings => self.settings_page(ui, ctx),
-            }
-        });
+                });
 
-        egui::TopBottomPanel::bottom("phase16_status").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.small(&self.status);
-                ui.separator();
-                ui.small(format!("{} assets", self.assets.len()));
-                ui.separator();
-                ui.small(format!("{} projects", self.projects.len()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small("DragonForge · Phase 16");
+            egui::CentralPanel::default()
+                .frame(egui::Frame::central_panel(&ctx.style()).fill(Self::bg()))
+                .show(ctx, |ui| {
+                    ui.add_space(16.0);
+                    self.details_panel(ui);
+                });
+        } else {
+            egui::TopBottomPanel::top("phase161_header")
+                .frame(egui::Frame::side_top_panel(&ctx.style()).fill(Self::panel_bg()))
+                .show(ctx, |ui| {
+                    ui.add_space(10.0);
+                    self.top_bar(ui);
+                    ui.add_space(10.0);
+                });
+
+            egui::CentralPanel::default()
+                .frame(egui::Frame::central_panel(&ctx.style()).fill(Self::bg()))
+                .show(ctx, |ui| {
+                    ui.add_space(14.0);
+                    match self.current_view {
+                        AppView::Library => {}
+                        AppView::Projects => self.projects_page(ui),
+                        AppView::Activity => self.activity_page(ui),
+                        AppView::Backups => self.backups_page(ui),
+                        AppView::AiSearch => self.ai_page(ui),
+                        AppView::Users => self.users_page(ui),
+                        AppView::Settings => self.settings_page(ui, ctx),
+                    }
+                });
+        }
+
+        egui::TopBottomPanel::bottom("phase161_status")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(Self::panel_bg()))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.small(egui::RichText::new(&self.status).color(Self::muted_text()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(
+                            egui::RichText::new("DragonForge · Phase 16.1")
+                                .color(Self::muted_text()),
+                        );
+                    });
                 });
             });
-        });
 
         self.upload_window(ctx);
         self.edit_window(ctx);
@@ -4530,7 +4834,7 @@ fn main() -> eframe::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         phase = 16,
         log_dir = %log_dir.display(),
-        "DragonForge client starting"
+        "DragonForge Phase 16.1 client starting"
     );
 
     let options = eframe::NativeOptions {
