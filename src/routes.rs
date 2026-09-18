@@ -5,6 +5,7 @@ use crate::{
     package,
     licensing,
     semantic,
+    tiering,
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, BackupCreateResponse, BackupStatusResponse, BackupVerifyResponse,
@@ -12,8 +13,9 @@ use crate::{
         CreateProjectRequest, DeleteResponse, HealthResponse,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
-        SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, UpdateAssetRequest,
-        UpdateProjectRequest, UploadMetadata, UploadResponse,
+        SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, StorageTierMoveResponse,
+        StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UploadMetadata,
+        UploadResponse,
     },
     storage::{self, IncomingFile, Storage},
     thumbnail,
@@ -62,6 +64,9 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         )
         .route("/api/assets/:id/download", get(download_asset))
         .route("/api/assets/:id/license-status", get(asset_license_status))
+        .route("/api/assets/:id/storage-tier", get(asset_storage_tier))
+        .route("/api/assets/:id/archive", axum::routing::post(archive_asset_storage))
+        .route("/api/assets/:id/recall", axum::routing::post(recall_asset_storage))
         .route("/api/checkouts", get(list_checkouts))
         .route(
             "/api/assets/:id/checkout",
@@ -116,7 +121,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 12,
+        phase: 14,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -160,6 +165,33 @@ async fn ensure_asset_mutation_allowed(
             checkout.holder, checkout.workstation
         )))
     }
+}
+
+async fn asset_storage_tier(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<StorageTierStatusResponse>> {
+    Ok(Json(tiering::status(&state.db, &state.storage, &id).await?))
+}
+
+async fn archive_asset_storage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<StorageTierMoveResponse>> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
+    info!(asset_id = %id, "asset archive requested");
+    Ok(Json(tiering::archive_asset(&state.db, &state.storage, &id).await?))
+}
+
+async fn recall_asset_storage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<StorageTierMoveResponse>> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
+    info!(asset_id = %id, "asset recall requested");
+    Ok(Json(tiering::recall_asset(&state.db, &state.storage, &id).await?))
 }
 
 async fn list_checkouts(
@@ -483,6 +515,7 @@ async fn create_backup(
         &state.db,
         state.storage.root(),
         &state.database_filename,
+        state.storage.archive_directory_opt(),
         &state.backup,
     )
     .await?;
