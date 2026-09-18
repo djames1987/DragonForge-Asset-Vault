@@ -96,6 +96,10 @@ pub async fn middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
+    if request.uri().path() == "/api/health" {
+        return Ok(next.run(request).await);
+    }
+
     if !state.auth.enabled {
         request.extensions_mut().insert(AuthContext {
             enabled: false,
