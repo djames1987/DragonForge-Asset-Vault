@@ -123,6 +123,10 @@ impl Storage {
         self.archive_dir.is_some()
     }
 
+    pub fn archive_directory_opt(&self) -> Option<&Path> {
+        self.archive_dir.as_deref()
+    }
+
     pub async fn commit_temp(
         &self,
         temp_path: &Path,
