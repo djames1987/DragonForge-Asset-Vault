@@ -352,3 +352,139 @@ Accent      #FF8A2A
 The accent is used for branding, primary actions, selected elements, focus, and important status rather than as a general background color.
 
 All Phase 1–16 functionality and server APIs remain intact.
+
+
+# Phase 16.2 — Project Asset Browser
+
+Phase 16.2 makes projects a first-class library browsing scope.
+
+## Project counts
+
+DragonForge exposes active linked-asset counts for every project and displays them in:
+
+- the Projects page
+- project quick links in the left navigation
+
+Deleted vault assets do not contribute to the displayed count.
+
+## Project-scoped Assets view
+
+Selecting **Browse Assets** from a project switches the standard Phase 16.1 three-column Assets interface into project scope:
+
+```text
+DragonForge Navigation | Project Asset List | Asset Details
+```
+
+No separate project-file browser is required.
+
+The selected project is preserved as the current project context so existing project actions continue working.
+
+## Project asset browser API
+
+```text
+GET /api/projects/:id/asset-browser
+GET /api/projects/asset-counts
+```
+
+Each project-browser entry contains:
+
+- full current vault Asset metadata
+- pinned project version
+- exported relative path
+- date added to the project
+- whether the project pin is behind the vault's current version
+
+## Search and filtering
+
+The normal asset search field remains available while browsing a project.
+
+Project scope supports filtering by:
+
+- asset name
+- original filename
+- category
+- creator
+- tags
+- category filter
+- tag filter
+- extension
+- license status
+
+Semantic Smart Search is intentionally hidden while project-scoped because the project asset set is already bounded and local filtering guarantees that no non-project asset appears.
+
+## Asset rows
+
+Project-scoped rows display:
+
+```text
+Pinned v2 · Latest v4 · OUTDATED · assets/dragonforge/wood.jpeg
+```
+
+or:
+
+```text
+Pinned v4 · Latest v4 · CURRENT · assets/dragonforge/cube.obj
+```
+
+The normal thumbnail, checkout, storage, preview, download, version-history, and Activity behavior remains available.
+
+## Detail workspace
+
+The Project section in Asset Details shows:
+
+- selected project name
+- pinned version
+- current vault version
+- exported relative path
+- update availability
+
+When outdated and the authenticated role can write:
+
+```text
+Update This Asset to Latest
+```
+
+reuses the existing engine-aware project export flow and updates only the selected project asset.
+
+## Remove from Project
+
+The existing safe project-removal workflow is available directly in the project-scoped browser.
+
+It retains:
+
+- package-aware path handling
+- project-root safety validation
+- staging/rollback
+- server unlink
+- license manifest regeneration
+- Phase 15 audit recording
+
+After successful removal, the project browser and project asset count refresh automatically.
+
+## Sidebar quick access
+
+Up to six projects appear beneath **Projects** in the Workspace section with their linked active-asset count.
+
+Selecting one opens that project's scoped asset browser immediately.
+
+All projects remain available on the full Projects page.
+
+## Read-only behavior
+
+Read-only users can:
+
+- browse a project's linked assets
+- search/filter within a project
+- inspect previews and metadata
+- see pinned/current versions
+- see exported paths
+- download
+- inspect versions/activity
+
+Read-only users cannot:
+
+- update a project asset to latest
+- add/remove project assets
+- repair/update project files
+
+Phase 13 server authorization remains authoritative.
