@@ -405,3 +405,28 @@ pub struct CheckoutStatusResponse {
     pub asset_id: String,
     pub checkout: Option<AssetCheckout>,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageObjectRef {
+    pub storage_path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageTierStatusResponse {
+    pub asset_id: String,
+    pub tier: String,
+    pub archive_enabled: bool,
+    pub object_count: usize,
+    pub transitioned_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageTierMoveResponse {
+    pub asset_id: String,
+    pub tier: String,
+    pub objects_moved: usize,
+    pub bytes_moved: u64,
+    pub source_copies_removed: usize,
+}
