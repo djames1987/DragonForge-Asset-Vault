@@ -2,9 +2,9 @@ use crate::{
     engine,
     error::{AppError, AppResult},
     models::{
-        Asset, AssetQuery, AssetRow, AssetVersion, CreateProjectRequest, PackageFile, Project,
-        ProjectAsset, ProjectAssetRequest, SemanticEmbeddingRow, StatsResponse, UpdateAssetRequest,
-        UpdateProjectRequest,
+        Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
+        CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetRequest,
+        SemanticEmbeddingRow, StatsResponse, UpdateAssetRequest, UpdateProjectRequest,
     },
 };
 use sqlx::{
@@ -117,6 +117,16 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS asset_checkouts (
+            asset_id TEXT PRIMARY KEY NOT NULL,
+            holder TEXT NOT NULL,
+            workstation TEXT NOT NULL,
+            note TEXT,
+            checked_out_at TEXT NOT NULL,
+            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS semantic_embeddings (
             asset_id TEXT PRIMARY KEY NOT NULL,
             model TEXT NOT NULL,
@@ -157,6 +167,7 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_package_files_sha ON package_files(sha256)",
         "CREATE INDEX IF NOT EXISTS idx_package_dependencies_asset ON package_dependencies(asset_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_model ON semantic_embeddings(model)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_checkouts_holder ON asset_checkouts(holder, workstation)",
     ];
 
     for statement in STATEMENTS {
@@ -281,6 +292,96 @@ pub async fn list_assets(pool: &SqlitePool, query: &AssetQuery) -> AppResult<Vec
         assets.push(hydrate(pool, row).await?);
     }
     Ok(assets)
+}
+
+pub async fn get_asset_checkout(
+    pool: &SqlitePool,
+    asset_id: &str,
+) -> AppResult<Option<AssetCheckout>> {
+    get_asset(pool, asset_id, true).await?;
+    Ok(sqlx::query_as::<_, AssetCheckout>(
+        "SELECT asset_id, holder, workstation, note, checked_out_at FROM asset_checkouts WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn list_asset_checkouts(pool: &SqlitePool) -> AppResult<Vec<AssetCheckout>> {
+    Ok(sqlx::query_as::<_, AssetCheckout>(
+        "SELECT asset_id, holder, workstation, note, checked_out_at FROM asset_checkouts ORDER BY checked_out_at DESC",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn checkout_asset(
+    pool: &SqlitePool,
+    asset_id: &str,
+    request: CheckoutRequest,
+) -> AppResult<AssetCheckout> {
+    get_asset(pool, asset_id, false).await?;
+    let holder = request.holder.trim();
+    let workstation = request.workstation.trim();
+    if holder.is_empty() || workstation.is_empty() {
+        return Err(AppError::BadRequest(
+            "checkout holder and workstation are required".to_string(),
+        ));
+    }
+
+    if let Some(existing) = get_asset_checkout(pool, asset_id).await? {
+        if existing.holder == holder && existing.workstation == workstation {
+            return Ok(existing);
+        }
+        return Err(AppError::Conflict(format!(
+            "asset is already checked out by {}@{}",
+            existing.holder, existing.workstation
+        )));
+    }
+
+    let checked_out_at = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO asset_checkouts(asset_id, holder, workstation, note, checked_out_at) VALUES(?, ?, ?, ?, ?)",
+    )
+    .bind(asset_id)
+    .bind(holder)
+    .bind(workstation)
+    .bind(request.note.as_deref())
+    .bind(&checked_out_at)
+    .execute(pool)
+    .await?;
+
+    Ok(AssetCheckout {
+        asset_id: asset_id.to_string(),
+        holder: holder.to_string(),
+        workstation: workstation.to_string(),
+        note: request.note,
+        checked_out_at,
+    })
+}
+
+pub async fn release_asset_checkout(
+    pool: &SqlitePool,
+    asset_id: &str,
+    holder: &str,
+    workstation: &str,
+) -> AppResult<()> {
+    if let Some(existing) = get_asset_checkout(pool, asset_id).await? {
+        if existing.holder != holder || existing.workstation != workstation {
+            return Err(AppError::Conflict(format!(
+                "asset is checked out by {}@{}",
+                existing.holder, existing.workstation
+            )));
+        }
+    } else {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query("DELETE FROM asset_checkouts WHERE asset_id = ?")
+        .bind(asset_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn upsert_semantic_embedding(
