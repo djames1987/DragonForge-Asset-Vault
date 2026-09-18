@@ -172,3 +172,15 @@ No existing asset needs to be re-imported.
 12. Confirm a new revision is created even when the primary file did not change.
 13. Restore the earlier package version and verify its file manifest returns.
 14. Upload the client/server logs for verification.
+
+
+## Phase 7.1 maintenance fix
+
+Phase 7.1 fixes two restore-time issues found during package validation:
+
+- Package revision restores now rebuild previews through the package-aware temporary workspace instead of attempting to preview the primary glTF in isolation.
+- The desktop client automatically refreshes the current package manifest and dependency diagnostics whenever a version restore changes the current revision.
+
+This prevents external-buffer glTF restores from logging a missing `.bin` preview error after the package manifest has already been restored correctly.
+
+Phase 7.1 package behavior remains fully backward compatible with Phase 7 data.
