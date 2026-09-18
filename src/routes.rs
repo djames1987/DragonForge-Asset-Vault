@@ -1,12 +1,14 @@
 use crate::{
     backup,
     db,
+    engine,
     package,
     licensing,
     semantic,
     error::{AppError, AppResult},
     models::{
         AssetQuery, AssetRow, BackupCreateResponse, BackupStatusResponse, BackupVerifyResponse,
+        EnginePreset, ProjectExportPlan,
         CreateProjectRequest, DeleteResponse, HealthResponse,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetRequest,
         ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse, RestoreVersionRequest,
@@ -47,6 +49,8 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/backups", get(backup_status).post(create_backup))
         .route("/api/backups/:id/verify", axum::routing::post(verify_backup))
+        .route("/api/engines/presets", get(engine_presets))
+        .route("/api/projects/:id/export-plan", get(project_export_plan))
         .route("/api/licenses/presets", get(license_presets))
         .route("/api/search/semantic", get(semantic_search))
         .route("/api/search/semantic/status", get(semantic_status))
@@ -353,6 +357,18 @@ async fn reindex_asset_semantic(
         1,
         Vec::new(),
     )))
+}
+
+async fn engine_presets() -> Json<&'static [EnginePreset]> {
+    Json(engine::presets())
+}
+
+async fn project_export_plan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<ProjectExportPlan>> {
+    let project = db::get_project(&state.db, &id).await?;
+    Ok(Json(engine::plan(&project)?))
 }
 
 async fn backup_status(
