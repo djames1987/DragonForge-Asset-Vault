@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AssetRow {
     pub id: String,
     pub name: String,
@@ -22,7 +22,7 @@ pub struct AssetRow {
     pub deleted_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     #[serde(flatten)]
     pub row: AssetRow,
@@ -41,7 +41,7 @@ pub struct UploadMetadata {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateAssetRequest {
     pub name: Option<String>,
     pub category: Option<String>,
@@ -58,8 +58,11 @@ pub struct AssetQuery {
     pub q: Option<String>,
     pub category: Option<String>,
     pub tag: Option<String>,
+    pub extension: Option<String>,
     #[serde(default)]
     pub include_deleted: bool,
+    #[serde(default)]
+    pub deleted_only: bool,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -84,10 +87,58 @@ pub struct StatsResponse {
     pub deleted_assets: i64,
     pub total_bytes: i64,
     pub unique_tags: i64,
+    pub projects: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DeleteResponse {
     pub id: String,
     pub deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreResponse {
+    pub id: String,
+    pub restored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub local_path: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    pub engine: Option<String>,
+    pub local_path: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateProjectRequest {
+    pub name: Option<String>,
+    pub engine: Option<String>,
+    pub local_path: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectAssetRequest {
+    pub asset_id: String,
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProjectAsset {
+    pub project_id: String,
+    pub asset_id: String,
+    pub relative_path: Option<String>,
+    pub added_at: String,
 }
