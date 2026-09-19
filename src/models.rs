@@ -612,6 +612,46 @@ pub struct CreateAssetRelationshipRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateAssetRelationshipRequest {
     pub kind: Option<AssetRelationshipKind>,
-    pub label: Option<String>,
-    pub note: Option<String>,
+    pub label: Option<Option<String>>,
+    pub note: Option<Option<String>>,
+}
+
+
+#[cfg(test)]
+mod phase18_relationship_tests {
+    use super::*;
+
+    #[test]
+    fn relationship_kinds_use_stable_snake_case_json() {
+        let cases = [
+            (AssetRelationshipKind::Variant, ""variant""),
+            (AssetRelationshipKind::Derivative, ""derivative""),
+            (AssetRelationshipKind::Export, ""export""),
+            (AssetRelationshipKind::Lod, ""lod""),
+            (AssetRelationshipKind::Collision, ""collision""),
+            (AssetRelationshipKind::Texture, ""texture""),
+            (AssetRelationshipKind::Material, ""material""),
+            (AssetRelationshipKind::Animation, ""animation""),
+            (AssetRelationshipKind::EngineExport, ""engine_export""),
+            (AssetRelationshipKind::Reference, ""reference""),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn relationship_kind_as_str_matches_json_contract() {
+        assert_eq!(AssetRelationshipKind::Variant.as_str(), "variant");
+        assert_eq!(AssetRelationshipKind::Derivative.as_str(), "derivative");
+        assert_eq!(AssetRelationshipKind::Export.as_str(), "export");
+        assert_eq!(AssetRelationshipKind::Lod.as_str(), "lod");
+        assert_eq!(AssetRelationshipKind::Collision.as_str(), "collision");
+        assert_eq!(AssetRelationshipKind::Texture.as_str(), "texture");
+        assert_eq!(AssetRelationshipKind::Material.as_str(), "material");
+        assert_eq!(AssetRelationshipKind::Animation.as_str(), "animation");
+        assert_eq!(AssetRelationshipKind::EngineExport.as_str(), "engine_export");
+        assert_eq!(AssetRelationshipKind::Reference.as_str(), "reference");
+    }
 }
