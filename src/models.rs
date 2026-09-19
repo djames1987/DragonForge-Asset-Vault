@@ -624,16 +624,16 @@ mod phase18_relationship_tests {
     #[test]
     fn relationship_kinds_use_stable_snake_case_json() {
         let cases = [
-            (AssetRelationshipKind::Variant, ""variant""),
-            (AssetRelationshipKind::Derivative, ""derivative""),
-            (AssetRelationshipKind::Export, ""export""),
-            (AssetRelationshipKind::Lod, ""lod""),
-            (AssetRelationshipKind::Collision, ""collision""),
-            (AssetRelationshipKind::Texture, ""texture""),
-            (AssetRelationshipKind::Material, ""material""),
-            (AssetRelationshipKind::Animation, ""animation""),
-            (AssetRelationshipKind::EngineExport, ""engine_export""),
-            (AssetRelationshipKind::Reference, ""reference""),
+            (AssetRelationshipKind::Variant, "\"variant\""),
+            (AssetRelationshipKind::Derivative, "\"derivative\""),
+            (AssetRelationshipKind::Export, "\"export\""),
+            (AssetRelationshipKind::Lod, "\"lod\""),
+            (AssetRelationshipKind::Collision, "\"collision\""),
+            (AssetRelationshipKind::Texture, "\"texture\""),
+            (AssetRelationshipKind::Material, "\"material\""),
+            (AssetRelationshipKind::Animation, "\"animation\""),
+            (AssetRelationshipKind::EngineExport, "\"engine_export\""),
+            (AssetRelationshipKind::Reference, "\"reference\""),
         ];
 
         for (kind, expected) in cases {
