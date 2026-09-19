@@ -291,6 +291,15 @@ fn audit_action(method: &Method, path: &str) -> String {
     if path.starts_with("/api/backups") && *method == Method::POST {
         return if path.ends_with("/verify") { "backup.verify" } else { "backup.create" }.to_string();
     }
+    if path.contains("/relationships") {
+        return match *method {
+            Method::POST => "asset.relationship.create",
+            Method::PATCH => "asset.relationship.update",
+            Method::DELETE => "asset.relationship.delete",
+            _ => "asset.relationship.view",
+        }
+        .to_string();
+    }
     if path.ends_with("/checkout") {
         return match *method {
             Method::POST => "asset.checkout",
