@@ -9,14 +9,17 @@ use crate::{
     tiering,
     error::{AppError, AppResult},
     models::{
-        AssetQuery, AssetRow, AuditExportResponse, AuditQuery, AuthMeResponse, BackupCreateResponse, BackupStatusResponse,
+        AssetQuery, AssetRelationshipEntry, AssetRow, AuditExportResponse, AuditQuery, AuthMeResponse,
+        BackupCreateResponse, BackupStatusResponse,
         BackupVerifyResponse, CheckoutRequest, CheckoutStatusResponse, CreateProjectRequest,
-        CreateUserRequest, DeleteResponse, EnginePreset, HealthResponse, ProjectExportPlan,
+        CreateAssetRelationshipRequest, CreateUserRequest, DeleteResponse, EnginePreset,
+        HealthResponse, ProjectExportPlan,
         PackageImportResponse, PackageManifest, PackageVersionResponse, ProjectAssetBrowserEntry,
         ProjectAssetCount, ProjectAssetRequest, ProjectLicenseEntry, ProjectLicenseReport, RestoreResponse,
         RestoreVersionRequest,
         SemanticSearchQuery, SemanticSearchResponse, SemanticSearchResult, StorageTierMoveResponse,
-        StorageTierStatusResponse, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest,
+        StorageTierStatusResponse, UpdateAssetRelationshipRequest, UpdateAssetRequest,
+        UpdateProjectRequest, UpdateUserRequest,
         UploadMetadata, UploadResponse, VaultUser,
     },
     storage::{self, IncomingFile, Storage},
@@ -75,6 +78,14 @@ pub fn router(state: AppState, max_upload_bytes: usize) -> Router {
             get(get_asset).patch(update_asset).delete(delete_asset),
         )
         .route("/api/assets/:id/download", get(download_asset))
+        .route(
+            "/api/assets/:id/relationships",
+            get(list_asset_relationships).post(create_asset_relationship),
+        )
+        .route(
+            "/api/assets/:id/relationships/:relationship_id",
+            axum::routing::patch(update_asset_relationship).delete(delete_asset_relationship),
+        )
         .route("/api/assets/:id/license-status", get(asset_license_status))
         .route("/api/assets/:id/storage-tier", get(asset_storage_tier))
         .route("/api/assets/:id/archive", axum::routing::post(archive_asset_storage))
@@ -346,6 +357,64 @@ async fn recall_asset_storage(
     ensure_asset_mutation_allowed(&state, &headers, &id).await?;
     info!(asset_id = %id, "asset recall requested");
     Ok(Json(tiering::recall_asset(&state.db, &state.storage, &id).await?))
+}
+
+async fn list_asset_relationships(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<AssetRelationshipEntry>>> {
+    Ok(Json(db::list_asset_relationships(&state.db, &id).await?))
+}
+
+async fn create_asset_relationship(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAssetRelationshipRequest>,
+) -> AppResult<(StatusCode, Json<crate::models::AssetRelationship>)> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
+    let relationship = db::create_asset_relationship(&state.db, &id, request).await?;
+    info!(
+        asset_id = %id,
+        relationship_id = %relationship.id,
+        kind = %relationship.kind,
+        related_asset_id = %relationship.related_asset_id,
+        "asset relationship created"
+    );
+    Ok((StatusCode::CREATED, Json(relationship)))
+}
+
+async fn update_asset_relationship(
+    State(state): State<Arc<AppState>>,
+    Path((id, relationship_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateAssetRelationshipRequest>,
+) -> AppResult<Json<crate::models::AssetRelationship>> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
+    let relationship =
+        db::update_asset_relationship(&state.db, &id, &relationship_id, request).await?;
+    info!(
+        asset_id = %id,
+        relationship_id = %relationship.id,
+        kind = %relationship.kind,
+        "asset relationship updated"
+    );
+    Ok(Json(relationship))
+}
+
+async fn delete_asset_relationship(
+    State(state): State<Arc<AppState>>,
+    Path((id, relationship_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> AppResult<StatusCode> {
+    ensure_asset_mutation_allowed(&state, &headers, &id).await?;
+    db::delete_asset_relationship(&state.db, &id, &relationship_id).await?;
+    info!(
+        asset_id = %id,
+        relationship_id = %relationship_id,
+        "asset relationship deleted"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_checkouts(
