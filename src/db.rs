@@ -400,16 +400,22 @@ pub async fn update_asset_relationship(
         .kind
         .map(|value| value.as_str().to_string())
         .unwrap_or_else(|| current.kind.clone());
-    let label = request
-        .label
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or(current.label.clone());
-    let note = request
-        .note
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or(current.note.clone());
+    let label = match request.label {
+        Some(Some(value)) => {
+            let value = value.trim().to_string();
+            if value.is_empty() { None } else { Some(value) }
+        }
+        Some(None) => None,
+        None => current.label.clone(),
+    };
+    let note = match request.note {
+        Some(Some(value)) => {
+            let value = value.trim().to_string();
+            if value.is_empty() { None } else { Some(value) }
+        }
+        Some(None) => None,
+        None => current.note.clone(),
+    };
     let now = chrono::Utc::now().to_rfc3339();
 
     let duplicate: i64 = sqlx::query_scalar(
