@@ -251,3 +251,24 @@ Archiving or recalling an asset in Phase 14 does not alter its relationships.
 13. Check out a source asset as another user and confirm relationship mutations respect the lock.
 14. Verify relationship create/delete events appear in Activity.
 15. Create/verify a backup and confirm the SQLite snapshot includes the Phase 18 relationship table.
+
+
+## Phase 18.2 runtime diagnostics
+
+Phase 18.2 corrects the desktop startup log metadata and adds explicit client-side runtime diagnostics for the relationship workflow.
+
+A successful relationship test can now be confirmed from logs without relying only on screenshots. The client records:
+
+```text
+DragonForge Phase 18 client starting
+asset relationship refresh started
+asset relationships loaded total=N outgoing=N incoming=N
+asset relationship editor opened
+asset relationship create started
+asset relationship created
+navigating to related asset
+asset relationship remove started
+asset relationship removed
+```
+
+No database migration or API contract change is required for Phase 18.2.
