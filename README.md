@@ -394,3 +394,17 @@ Phase 18.1 fixes the initial Phase 18 compile break found by local Windows valid
 - fixes malformed escaped JSON string literals in the Phase 18 relationship serialization tests
 
 No Phase 18 behavior or API contract changes are introduced by this maintenance release.
+
+
+## Phase 18.2 maintenance
+
+Phase 18.2 improves runtime validation and corrects stale client milestone metadata:
+
+- client startup logs now report Phase 18 instead of the old Phase 16.1 label
+- relationship refreshes log asset ID and incoming/outgoing/total counts
+- opening the relationship editor is logged
+- relationship creation logs source asset, related asset, relationship ID, and type
+- related-asset navigation is logged
+- relationship removal logs both asset ID and relationship ID
+
+This maintenance release does not change the Phase 18 relationship API or database schema.
