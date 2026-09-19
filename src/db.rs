@@ -2,11 +2,13 @@ use crate::{
     engine,
     error::{AppError, AppResult},
     models::{
-        Asset, AssetCheckout, AssetQuery, AssetRow, AssetVersion, CheckoutRequest,
+        Asset, AssetCheckout, AssetQuery, AssetRelationship, AssetRelationshipEntry,
+        AssetVersion, CheckoutRequest, CreateAssetRelationshipRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetBrowserEntry,
         ProjectAssetCount, ProjectAssetRequest,
         AuditEvent, AuditQuery, CreateUserRequest, SemanticEmbeddingRow, StatsResponse,
-        StorageObjectRef, UpdateAssetRequest, UpdateProjectRequest, UpdateUserRequest, UserRole,
+        StorageObjectRef, UpdateAssetRelationshipRequest, UpdateAssetRequest, UpdateProjectRequest,
+        UpdateUserRequest, UserRole,
         VaultUser,
     },
 };
@@ -66,6 +68,21 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
             tag TEXT NOT NULL COLLATE NOCASE,
             PRIMARY KEY(asset_id, tag),
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS asset_relationships (
+            id TEXT PRIMARY KEY NOT NULL,
+            source_asset_id TEXT NOT NULL,
+            related_asset_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            label TEXT,
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_asset_id, related_asset_id, kind),
+            FOREIGN KEY(source_asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+            FOREIGN KEY(related_asset_id) REFERENCES assets(id) ON DELETE CASCADE
         )
         "#,
         r#"
@@ -200,6 +217,8 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_assets_created_at ON assets(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_assets_deleted_at ON assets(deleted_at)",
         "CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_relationships_source ON asset_relationships(source_asset_id, kind)",
+        "CREATE INDEX IF NOT EXISTS idx_asset_relationships_related ON asset_relationships(related_asset_id, kind)",
         "CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)",
         "CREATE INDEX IF NOT EXISTS idx_project_assets_asset ON project_assets(asset_id)",
         "CREATE INDEX IF NOT EXISTS idx_asset_versions_asset ON asset_versions(asset_id, version_number)",
@@ -254,6 +273,187 @@ async fn initialize(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+pub async fn list_asset_relationships(
+    pool: &SqlitePool,
+    asset_id: &str,
+) -> AppResult<Vec<AssetRelationshipEntry>> {
+    get_asset(pool, asset_id, true).await?;
+
+    let rows = sqlx::query_as::<_, AssetRelationship>(
+        r#"
+        SELECT id, source_asset_id, related_asset_id, kind, label, note, created_at, updated_at
+        FROM asset_relationships
+        WHERE source_asset_id = ? OR related_asset_id = ?
+        ORDER BY kind COLLATE NOCASE, created_at, id
+        "#,
+    )
+    .bind(asset_id)
+    .bind(asset_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for relationship in rows {
+        let outgoing = relationship.source_asset_id == asset_id;
+        let other_id = if outgoing {
+            &relationship.related_asset_id
+        } else {
+            &relationship.source_asset_id
+        };
+        let asset = get_asset(pool, other_id, true).await?;
+        entries.push(AssetRelationshipEntry {
+            relationship,
+            direction: if outgoing { "outgoing" } else { "incoming" }.to_string(),
+            asset,
+        });
+    }
+    Ok(entries)
+}
+
+pub async fn create_asset_relationship(
+    pool: &SqlitePool,
+    source_asset_id: &str,
+    request: CreateAssetRelationshipRequest,
+) -> AppResult<AssetRelationship> {
+    get_asset(pool, source_asset_id, true).await?;
+    get_asset(pool, &request.related_asset_id, true).await?;
+
+    if source_asset_id == request.related_asset_id {
+        return Err(AppError::BadRequest(
+            "an asset cannot be related to itself".to_string(),
+        ));
+    }
+
+    let kind = request.kind.as_str();
+    let duplicate: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM asset_relationships WHERE source_asset_id = ? AND related_asset_id = ? AND kind = ?",
+    )
+    .bind(source_asset_id)
+    .bind(&request.related_asset_id)
+    .bind(kind)
+    .fetch_one(pool)
+    .await?;
+    if duplicate > 0 {
+        return Err(AppError::Conflict(
+            "this asset relationship already exists".to_string(),
+        ));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let label = request.label.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let note = request.note.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+
+    sqlx::query(
+        r#"
+        INSERT INTO asset_relationships(
+            id, source_asset_id, related_asset_id, kind, label, note, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(source_asset_id)
+    .bind(&request.related_asset_id)
+    .bind(kind)
+    .bind(label)
+    .bind(note)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    get_asset_relationship(pool, &id).await
+}
+
+pub async fn get_asset_relationship(
+    pool: &SqlitePool,
+    relationship_id: &str,
+) -> AppResult<AssetRelationship> {
+    sqlx::query_as::<_, AssetRelationship>(
+        r#"
+        SELECT id, source_asset_id, related_asset_id, kind, label, note, created_at, updated_at
+        FROM asset_relationships
+        WHERE id = ?
+        "#,
+    )
+    .bind(relationship_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+pub async fn update_asset_relationship(
+    pool: &SqlitePool,
+    asset_id: &str,
+    relationship_id: &str,
+    request: UpdateAssetRelationshipRequest,
+) -> AppResult<AssetRelationship> {
+    let current = get_asset_relationship(pool, relationship_id).await?;
+    if current.source_asset_id != asset_id && current.related_asset_id != asset_id {
+        return Err(AppError::NotFound);
+    }
+
+    let kind = request
+        .kind
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| current.kind.clone());
+    let label = request
+        .label
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(current.label.clone());
+    let note = request
+        .note
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(current.note.clone());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let duplicate: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM asset_relationships WHERE source_asset_id = ? AND related_asset_id = ? AND kind = ? AND id <> ?",
+    )
+    .bind(&current.source_asset_id)
+    .bind(&current.related_asset_id)
+    .bind(&kind)
+    .bind(relationship_id)
+    .fetch_one(pool)
+    .await?;
+    if duplicate > 0 {
+        return Err(AppError::Conflict(
+            "this asset relationship already exists".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE asset_relationships SET kind = ?, label = ?, note = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&kind)
+    .bind(label)
+    .bind(note)
+    .bind(&now)
+    .bind(relationship_id)
+    .execute(pool)
+    .await?;
+
+    get_asset_relationship(pool, relationship_id).await
+}
+
+pub async fn delete_asset_relationship(
+    pool: &SqlitePool,
+    asset_id: &str,
+    relationship_id: &str,
+) -> AppResult<()> {
+    let current = get_asset_relationship(pool, relationship_id).await?;
+    if current.source_asset_id != asset_id && current.related_asset_id != asset_id {
+        return Err(AppError::NotFound);
+    }
+    sqlx::query("DELETE FROM asset_relationships WHERE id = ?")
+        .bind(relationship_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
