@@ -311,6 +311,57 @@ struct ProjectAssetCount {
     asset_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AssetRelationshipKind {
+    Variant,
+    Derivative,
+    Export,
+    Lod,
+    Collision,
+    Texture,
+    Material,
+    Animation,
+    EngineExport,
+    Reference,
+}
+
+impl AssetRelationshipKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Variant => "Variant",
+            Self::Derivative => "Derivative",
+            Self::Export => "Export",
+            Self::Lod => "LOD",
+            Self::Collision => "Collision",
+            Self::Texture => "Texture",
+            Self::Material => "Material",
+            Self::Animation => "Animation",
+            Self::EngineExport => "Engine Export",
+            Self::Reference => "Reference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssetRelationship {
+    id: String,
+    source_asset_id: String,
+    related_asset_id: String,
+    kind: String,
+    label: Option<String>,
+    note: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssetRelationshipEntry {
+    relationship: AssetRelationship,
+    direction: String,
+    asset: Asset,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum LicenseStatus {
@@ -536,6 +587,20 @@ enum ClientEvent {
         asset_id: String,
         result: Result<PathBuf, String>,
     },
+    RelationshipsLoaded {
+        asset_id: String,
+        result: Result<Vec<AssetRelationshipEntry>, String>,
+    },
+    RelationshipCreated {
+        asset_id: String,
+        result: Result<AssetRelationship, String>,
+    },
+    RelationshipDeleted {
+        asset_id: String,
+        relationship_id: String,
+        result: Result<(), String>,
+    },
+    RelationshipCandidates(Result<Vec<Asset>, String>),
     Upload(Result<UploadResponse, String>),
     Update(Result<Asset, String>),
     Delete {
@@ -612,6 +677,15 @@ struct DragonForgeClient {
     checkout_status: HashMap<String, Option<AssetCheckout>>,
     checkout_note: String,
     storage_tiers: HashMap<String, StorageTierStatusResponse>,
+    relationships: HashMap<String, Vec<AssetRelationshipEntry>>,
+    relationship_candidates: Vec<Asset>,
+    show_relationship_editor: bool,
+    relationship_source_asset_id: Option<String>,
+    relationship_target_id: Option<String>,
+    relationship_kind: AssetRelationshipKind,
+    relationship_label: String,
+    relationship_note: String,
+    relationship_search: String,
     deleted_only: bool,
     status: String,
     health: Option<HealthResponse>,
@@ -697,6 +771,15 @@ impl DragonForgeClient {
             checkout_status: HashMap::new(),
             checkout_note: String::new(),
             storage_tiers: HashMap::new(),
+            relationships: HashMap::new(),
+            relationship_candidates: Vec::new(),
+            show_relationship_editor: false,
+            relationship_source_asset_id: None,
+            relationship_target_id: None,
+            relationship_kind: AssetRelationshipKind::Derivative,
+            relationship_label: String::new(),
+            relationship_note: String::new(),
+            relationship_search: String::new(),
             deleted_only: false,
             status: "Ready".to_string(),
             health: None,
@@ -1696,6 +1779,147 @@ impl DragonForgeClient {
                 result,
             });
         });
+    }
+
+    fn refresh_relationships(&mut self, asset_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<AssetRelationshipEntry>, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/assets/{asset_id}/relationships"))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::RelationshipsLoaded { asset_id, result });
+        });
+    }
+
+    fn refresh_relationship_candidates(&mut self) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        thread::spawn(move || {
+            let result = (|| -> Result<Vec<Asset>, String> {
+                Self::api_client()?
+                    .get(format!("{base}/api/assets"))
+                    .query(&[("limit", "500")])
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::RelationshipCandidates(result));
+        });
+    }
+
+    fn open_relationship_editor(&mut self) {
+        let Some(asset) = self.selected_asset().cloned() else {
+            self.status = "Select an asset first.".to_string();
+            return;
+        };
+        self.relationship_source_asset_id = Some(asset.id.clone());
+        self.relationship_target_id = None;
+        self.relationship_kind = AssetRelationshipKind::Derivative;
+        self.relationship_label.clear();
+        self.relationship_note.clear();
+        self.relationship_search.clear();
+        self.show_relationship_editor = true;
+        self.refresh_relationship_candidates();
+        self.refresh_relationships(asset.id);
+    }
+
+    fn create_relationship(&mut self) {
+        let Some(source_asset_id) = self.relationship_source_asset_id.clone() else {
+            return;
+        };
+        let Some(related_asset_id) = self.relationship_target_id.clone() else {
+            self.status = "Choose a related asset first.".to_string();
+            return;
+        };
+        if source_asset_id == related_asset_id {
+            self.status = "An asset cannot be related to itself.".to_string();
+            return;
+        }
+
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        let kind = self.relationship_kind.clone();
+        let label = self.relationship_label.trim().to_string();
+        let note = self.relationship_note.trim().to_string();
+        self.busy_count += 1;
+        self.status = "Creating asset relationship...".to_string();
+
+        thread::spawn(move || {
+            let body = serde_json::json!({
+                "related_asset_id": related_asset_id,
+                "kind": kind,
+                "label": if label.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(label) },
+                "note": if note.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(note) }
+            });
+            let result = (|| -> Result<AssetRelationship, String> {
+                Self::api_client()?
+                    .post(format!("{base}/api/assets/{source_asset_id}/relationships"))
+                    .json(&body)
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(ClientEvent::RelationshipCreated {
+                asset_id: source_asset_id,
+                result,
+            });
+        });
+    }
+
+    fn delete_relationship(&mut self, asset_id: String, relationship_id: String) {
+        let tx = self.tx.clone();
+        let base = self.base_url();
+        self.busy_count += 1;
+        self.status = "Removing asset relationship...".to_string();
+        thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                Self::api_client()?
+                    .delete(format!(
+                        "{base}/api/assets/{asset_id}/relationships/{relationship_id}"
+                    ))
+                    .send()
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            let _ = tx.send(ClientEvent::RelationshipDeleted {
+                asset_id,
+                relationship_id,
+                result,
+            });
+        });
+    }
+
+    fn show_related_asset(&mut self, asset: Asset) {
+        self.project_filter_id = None;
+        self.project_browser_entries.clear();
+        self.deleted_only = false;
+        self.search = asset.name.clone();
+        self.category_filter.clear();
+        self.tag_filter.clear();
+        self.extension_filter.clear();
+        self.license_filter = "All".to_string();
+        self.current_view = AppView::Library;
+        self.assets = vec![asset.clone()];
+        self.selected_id = Some(asset.id.clone());
+        self.refresh_checkout(asset.id.clone());
+        self.refresh_storage_tier(asset.id.clone());
+        self.refresh_relationships(asset.id);
     }
 
     fn refresh_assets(&mut self) {
@@ -2710,6 +2934,50 @@ impl DragonForgeClient {
                         }
                     }
                 }
+                ClientEvent::RelationshipsLoaded { asset_id, result } => {
+                    match result {
+                        Ok(entries) => {
+                            self.relationships.insert(asset_id, entries);
+                        }
+                        Err(err) => {
+                            warn!(asset_id = %asset_id, error = %err, "asset relationships failed to load");
+                            self.status = format!("Relationship load failed: {err}");
+                        }
+                    }
+                }
+                ClientEvent::RelationshipCandidates(result) => {
+                    match result {
+                        Ok(assets) => self.relationship_candidates = assets,
+                        Err(err) => self.status = format!("Could not load relationship candidates: {err}"),
+                    }
+                }
+                ClientEvent::RelationshipCreated { asset_id, result } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(relationship) => {
+                            self.status = format!("Created {} relationship", relationship.kind);
+                            self.relationship_target_id = None;
+                            self.relationship_label.clear();
+                            self.relationship_note.clear();
+                            self.refresh_relationships(asset_id);
+                        }
+                        Err(err) => self.status = format!("Create relationship failed: {err}"),
+                    }
+                }
+                ClientEvent::RelationshipDeleted {
+                    asset_id,
+                    relationship_id: _,
+                    result,
+                } => {
+                    self.busy_count = self.busy_count.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            self.status = "Asset relationship removed".to_string();
+                            self.refresh_relationships(asset_id);
+                        }
+                        Err(err) => self.status = format!("Remove relationship failed: {err}"),
+                    }
+                }
                 ClientEvent::Assets(result) => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
@@ -3318,7 +3586,8 @@ impl DragonForgeClient {
             info!(asset_id = %id, "asset selected");
             self.selected_id = Some(id.clone());
             self.refresh_checkout(id.clone());
-            self.refresh_storage_tier(id);
+            self.refresh_storage_tier(id.clone());
+            self.refresh_relationships(id);
         }
     }
 
@@ -3488,6 +3757,96 @@ impl DragonForgeClient {
                         }
                     });
                 }
+
+                ui.add_space(18.0);
+                ui.label(
+                    egui::RichText::new("RELATIONSHIPS")
+                        .size(11.0)
+                        .strong()
+                        .color(Self::muted_text()),
+                );
+                ui.separator();
+
+                let relationship_entries = self
+                    .relationships
+                    .get(&asset.id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if relationship_entries.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No linked variants or derivatives.")
+                            .color(Self::muted_text()),
+                    );
+                } else {
+                    for entry in relationship_entries {
+                        egui::Frame::group(ui.style())
+                            .fill(Self::panel_bg())
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let direction = if entry.direction == "outgoing" {
+                                        "→"
+                                    } else {
+                                        "←"
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} {}",
+                                            direction,
+                                            entry.relationship.kind.replace('_', " ").to_ascii_uppercase()
+                                        ))
+                                        .strong()
+                                        .color(Self::accent()),
+                                    );
+                                    ui.label(egui::RichText::new(&entry.asset.name).strong());
+                                    if entry.asset.deleted_at.is_some() {
+                                        ui.small("RECYCLE BIN");
+                                    }
+                                });
+                                if let Some(label) = entry.relationship.label.as_deref() {
+                                    ui.small(label);
+                                }
+                                if let Some(note) = entry.relationship.note.as_deref() {
+                                    ui.small(
+                                        egui::RichText::new(note).color(Self::muted_text()),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.button("Show Asset").clicked() {
+                                        self.show_related_asset(entry.asset.clone());
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            can_write && self.busy_count == 0,
+                                            egui::Button::new("Remove Link"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.delete_relationship(
+                                            asset.id.clone(),
+                                            entry.relationship.id.clone(),
+                                        );
+                                    }
+                                });
+                            });
+                        ui.add_space(5.0);
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_write && asset.deleted_at.is_none(),
+                            egui::Button::new("+ Add Relationship"),
+                        )
+                        .clicked()
+                    {
+                        self.open_relationship_editor();
+                    }
+                    if ui.button("Refresh Links").clicked() {
+                        self.refresh_relationships(asset.id.clone());
+                    }
+                });
 
                 ui.add_space(18.0);
                 ui.label(
@@ -3665,6 +4024,122 @@ impl DragonForgeClient {
                     }
                 });
             });
+    }
+
+    fn relationship_editor_window(&mut self, ctx: &egui::Context) {
+        if !self.show_relationship_editor {
+            return;
+        }
+        let mut open = self.show_relationship_editor;
+        egui::Window::new("Add Asset Relationship")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(620.0)
+            .show(ctx, |ui| {
+                let source = self
+                    .relationship_source_asset_id
+                    .as_deref()
+                    .and_then(|id| self.assets.iter().find(|asset| asset.id == id))
+                    .map(|asset| asset.name.clone())
+                    .unwrap_or_else(|| "Selected asset".to_string());
+
+                ui.heading(source);
+                ui.label(
+                    egui::RichText::new(
+                        "Link this asset to another vault asset as a variant, derivative, export, LOD, collision mesh, texture, material, animation, engine export, or reference.",
+                    )
+                    .color(Self::muted_text()),
+                );
+                ui.separator();
+
+                ui.label("Relationship Type");
+                egui::ComboBox::from_id_salt("phase18_relationship_kind")
+                    .selected_text(self.relationship_kind.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Variant, "Variant");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Derivative, "Derivative");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Export, "Export");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Lod, "LOD");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Collision, "Collision");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Texture, "Texture");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Material, "Material");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Animation, "Animation");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::EngineExport, "Engine Export");
+                        ui.selectable_value(&mut self.relationship_kind, AssetRelationshipKind::Reference, "Reference");
+                    });
+
+                ui.add_space(8.0);
+                ui.label("Find Related Asset");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.relationship_search)
+                        .hint_text("Search by name, filename, category, or tag")
+                        .desired_width(420.0),
+                );
+
+                let query = self.relationship_search.trim().to_ascii_lowercase();
+                let source_id = self.relationship_source_asset_id.as_deref();
+                egui::ScrollArea::vertical()
+                    .max_height(250.0)
+                    .show(ui, |ui| {
+                        for candidate in self
+                            .relationship_candidates
+                            .iter()
+                            .filter(|candidate| Some(candidate.id.as_str()) != source_id)
+                            .filter(|candidate| {
+                                query.is_empty()
+                                    || candidate.name.to_ascii_lowercase().contains(&query)
+                                    || candidate.original_filename.to_ascii_lowercase().contains(&query)
+                                    || candidate.category.as_deref().unwrap_or("").to_ascii_lowercase().contains(&query)
+                                    || candidate.tags.iter().any(|tag| tag.to_ascii_lowercase().contains(&query))
+                            })
+                            .take(100)
+                        {
+                            let selected = self.relationship_target_id.as_deref()
+                                == Some(candidate.id.as_str());
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    format!(
+                                        "{} · {} · v{}",
+                                        candidate.name,
+                                        candidate.extension.as_deref().unwrap_or("file").to_ascii_uppercase(),
+                                        candidate.current_version
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.relationship_target_id = Some(candidate.id.clone());
+                            }
+                        }
+                    });
+
+                ui.add_space(8.0);
+                ui.label("Label (optional)");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.relationship_label)
+                        .hint_text("e.g. Unity mobile export"),
+                );
+                ui.label("Note (optional)");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.relationship_note)
+                        .desired_rows(3)
+                        .hint_text("Describe why these assets are related."),
+                );
+
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        self.can_write()
+                            && self.busy_count == 0
+                            && self.relationship_target_id.is_some(),
+                        egui::Button::new("Create Relationship").fill(Self::accent()),
+                    )
+                    .clicked()
+                {
+                    self.create_relationship();
+                }
+            });
+        self.show_relationship_editor = open;
     }
 
     fn upload_window(&mut self, ctx: &egui::Context) {
@@ -4639,13 +5114,14 @@ impl eframe::App for DragonForgeClient {
                     ui.small(egui::RichText::new(&self.status).color(Self::muted_text()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small(
-                            egui::RichText::new("DragonForge · Phase 16.1")
+                            egui::RichText::new("DragonForge · Phase 18")
                                 .color(Self::muted_text()),
                         );
                     });
                 });
             });
 
+        self.relationship_editor_window(ctx);
         self.upload_window(ctx);
         self.edit_window(ctx);
         self.project_window(ctx);
