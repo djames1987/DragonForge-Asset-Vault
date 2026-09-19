@@ -155,7 +155,7 @@ async fn health(
     Json(HealthResponse {
         ok: true,
         service: "dragonforge-asset-vault",
-        phase: 16,
+        phase: 18,
         version: env!("CARGO_PKG_VERSION"),
         auth_enabled: state.auth.enabled,
     })
