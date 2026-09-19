@@ -384,3 +384,13 @@ Developer/Administrator users can use **+ Add Relationship** to search active va
 Relationship records are independent of binary revisions and project membership, so updating an asset version does not break its lineage. They are stored in SQLite and are automatically preserved by Phase 10 backups.
 
 Phase 15 audit history records relationship create/update/delete actions.
+
+
+## Phase 18.1 maintenance
+
+Phase 18.1 fixes the initial Phase 18 compile break found by local Windows validation:
+
+- restores the missing `AssetRow` import in `src/db.rs`
+- fixes malformed escaped JSON string literals in the Phase 18 relationship serialization tests
+
+No Phase 18 behavior or API contract changes are introduced by this maintenance release.
