@@ -548,3 +548,70 @@ pub struct ProjectAssetCount {
     pub project_id: String,
     pub asset_count: i64,
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetRelationshipKind {
+    Variant,
+    Derivative,
+    Export,
+    Lod,
+    Collision,
+    Texture,
+    Material,
+    Animation,
+    EngineExport,
+    Reference,
+}
+
+impl AssetRelationshipKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Variant => "variant",
+            Self::Derivative => "derivative",
+            Self::Export => "export",
+            Self::Lod => "lod",
+            Self::Collision => "collision",
+            Self::Texture => "texture",
+            Self::Material => "material",
+            Self::Animation => "animation",
+            Self::EngineExport => "engine_export",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AssetRelationship {
+    pub id: String,
+    pub source_asset_id: String,
+    pub related_asset_id: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRelationshipEntry {
+    pub relationship: AssetRelationship,
+    pub direction: String,
+    pub asset: Asset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAssetRelationshipRequest {
+    pub related_asset_id: String,
+    pub kind: AssetRelationshipKind,
+    pub label: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAssetRelationshipRequest {
+    pub kind: Option<AssetRelationshipKind>,
+    pub label: Option<String>,
+    pub note: Option<String>,
+}
