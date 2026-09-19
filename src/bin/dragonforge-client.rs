@@ -1782,6 +1782,7 @@ impl DragonForgeClient {
     }
 
     fn refresh_relationships(&mut self, asset_id: String) {
+        info!(asset_id = %asset_id, "asset relationship refresh started");
         let tx = self.tx.clone();
         let base = self.base_url();
         thread::spawn(move || {
@@ -1829,6 +1830,7 @@ impl DragonForgeClient {
         self.relationship_label.clear();
         self.relationship_note.clear();
         self.relationship_search.clear();
+        info!(asset_id = %asset.id, "asset relationship editor opened");
         self.show_relationship_editor = true;
         self.refresh_relationship_candidates();
         self.refresh_relationships(asset.id);
@@ -1854,6 +1856,12 @@ impl DragonForgeClient {
         let note = self.relationship_note.trim().to_string();
         self.busy_count += 1;
         self.status = "Creating asset relationship...".to_string();
+        info!(
+            source_asset_id = %source_asset_id,
+            related_asset_id = %related_asset_id,
+            kind = %kind.label(),
+            "asset relationship create started"
+        );
 
         thread::spawn(move || {
             let body = serde_json::json!({
@@ -1885,6 +1893,11 @@ impl DragonForgeClient {
         let base = self.base_url();
         self.busy_count += 1;
         self.status = "Removing asset relationship...".to_string();
+        info!(
+            asset_id = %asset_id,
+            relationship_id = %relationship_id,
+            "asset relationship remove started"
+        );
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 Self::api_client()?
@@ -1906,6 +1919,7 @@ impl DragonForgeClient {
     }
 
     fn show_related_asset(&mut self, asset: Asset) {
+        info!(asset_id = %asset.id, asset_name = %asset.name, "navigating to related asset");
         self.project_filter_id = None;
         self.project_browser_entries.clear();
         self.deleted_only = false;
@@ -2937,6 +2951,15 @@ impl DragonForgeClient {
                 ClientEvent::RelationshipsLoaded { asset_id, result } => {
                     match result {
                         Ok(entries) => {
+                            let outgoing = entries.iter().filter(|entry| entry.direction == "outgoing").count();
+                            let incoming = entries.iter().filter(|entry| entry.direction == "incoming").count();
+                            info!(
+                                asset_id = %asset_id,
+                                total = entries.len(),
+                                outgoing,
+                                incoming,
+                                "asset relationships loaded"
+                            );
                             self.relationships.insert(asset_id, entries);
                         }
                         Err(err) => {
@@ -2955,6 +2978,13 @@ impl DragonForgeClient {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
                         Ok(relationship) => {
+                            info!(
+                                asset_id = %asset_id,
+                                relationship_id = %relationship.id,
+                                related_asset_id = %relationship.related_asset_id,
+                                kind = %relationship.kind,
+                                "asset relationship created"
+                            );
                             self.status = format!("Created {} relationship", relationship.kind);
                             self.relationship_target_id = None;
                             self.relationship_label.clear();
@@ -2966,12 +2996,17 @@ impl DragonForgeClient {
                 }
                 ClientEvent::RelationshipDeleted {
                     asset_id,
-                    relationship_id: _,
+                    relationship_id,
                     result,
                 } => {
                     self.busy_count = self.busy_count.saturating_sub(1);
                     match result {
                         Ok(()) => {
+                            info!(
+                                asset_id = %asset_id,
+                                relationship_id = %relationship_id,
+                                "asset relationship removed"
+                            );
                             self.status = "Asset relationship removed".to_string();
                             self.refresh_relationships(asset_id);
                         }
@@ -5597,9 +5632,9 @@ fn main() -> eframe::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        phase = 16,
+        phase = 18,
         log_dir = %log_dir.display(),
-        "DragonForge Phase 16.1 client starting"
+        "DragonForge Phase 18 client starting"
     );
 
     let options = eframe::NativeOptions {
