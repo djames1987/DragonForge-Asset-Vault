@@ -2,7 +2,7 @@ use crate::{
     engine,
     error::{AppError, AppResult},
     models::{
-        Asset, AssetCheckout, AssetQuery, AssetRelationship, AssetRelationshipEntry,
+        Asset, AssetCheckout, AssetQuery, AssetRelationship, AssetRelationshipEntry, AssetRow,
         AssetVersion, CheckoutRequest, CreateAssetRelationshipRequest,
         CreateProjectRequest, PackageFile, Project, ProjectAsset, ProjectAssetBrowserEntry,
         ProjectAssetCount, ProjectAssetRequest,
