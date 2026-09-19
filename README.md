@@ -4,7 +4,7 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 
 ## Current milestone
 
-**Phase 16.2 — Project Asset Browser**
+**Phase 18 — Asset Relationships, Variants & Derivatives**
 
 ### Server
 
@@ -83,6 +83,8 @@ DragonForge Asset Vault is a LAN-first game-development asset manager for source
 - project-scoped asset browsing with pinned-version/path status
 - per-project asset counts and sidebar quick links
 - per-asset update-to-latest from project view
+- directional asset relationship graph for variants, derivatives, exports, LODs, collisions, textures, materials, animations, engine exports, and references
+- relationship lineage shown directly in the asset detail workspace
 - dedicated Projects, Activity, Backups, AI Search, Users, and Settings pages
 - persistent theme, UI scale, card size, and layout preferences
 
@@ -352,3 +354,33 @@ The normal large asset detail workspace remains available while browsing a proje
 When a project pin is behind the current vault revision, the detail pane offers **Update This Asset to Latest** for Developer/Administrator users. Existing safe **Remove from Project** behavior also works directly from the project-scoped browser.
 
 Read-only users may browse project assets, pinned versions, paths, previews, downloads, versions, and activity, but project mutations remain disabled and server-enforced.
+
+
+## Phase 18 asset relationships, variants, and derivatives
+
+Phase 18 adds an explicit graph between otherwise independent vault assets.
+
+Supported relationship types:
+
+```text
+Variant
+Derivative
+Export
+LOD
+Collision
+Texture
+Material
+Animation
+Engine Export
+Reference
+```
+
+Relationships are directional. The asset where the link is created is the source/base side and the chosen related asset is the outgoing side. When viewing the other asset, the same link appears as incoming.
+
+The Phase 16.1 Asset Details workspace now includes a **RELATIONSHIPS** section. It shows both incoming and outgoing links, optional labels/notes, deleted/recycle-bin status, and actions to open or unlink a related asset.
+
+Developer/Administrator users can use **+ Add Relationship** to search active vault assets and create a typed link. Read-only users can inspect lineage but cannot modify it.
+
+Relationship records are independent of binary revisions and project membership, so updating an asset version does not break its lineage. They are stored in SQLite and are automatically preserved by Phase 10 backups.
+
+Phase 15 audit history records relationship create/update/delete actions.
