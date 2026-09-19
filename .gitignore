@@ -7,3 +7,4 @@ DragonForge.toml
 .env
 .DS_Store
 Thumbs.db
+validation-logs/
