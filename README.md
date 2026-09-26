@@ -1,422 +1,127 @@
 # DragonForge Asset Vault
 
-DragonForge Asset Vault is a LAN-first game-development asset manager for source assets, metadata, hashes, previews, revision history, multi-file packages, dependencies, projects, and license/attribution tracking.
+DragonForge Asset Vault is a Windows-first, LAN-oriented asset manager for game-development teams and solo projects. It combines source-asset storage, revision history, license/attribution tracking, project pinning, collaboration controls, backups, archive tiers, and AI-assisted search in one desktop workflow.
 
-## License
+> **Status:** Phase 18.2 maintenance baseline. The current implementation includes relationship/lineage tracking between assets in addition to the earlier versioning, project, search, collaboration, storage, and audit features.
 
-Copyright © 2026 David James. All rights reserved.
+## What it manages
 
-The current DragonForge Asset Vault source is source-visible for evaluation, portfolio review, security review, and reference, but it is **not open source**. Except for rights expressly required by GitHub's Terms of Service for public repositories, no general license is granted to use, copy, modify, redistribute, sublicense, sell, commercially exploit, or incorporate original DragonForge material into another work.
+Asset Vault is designed around the lifecycle of a game-development asset rather than treating files as an unstructured shared folder.
 
-See [LICENSE](LICENSE). Third-party components retain their independent licenses and rights.
+Major capabilities include:
 
-### Historical MIT-licensed versions
+- content-addressed storage with SHA-256 duplicate detection;
+- immutable asset revision history;
+- single-file and ZIP package imports;
+- image and 3D previews;
+- categories, tags, package/dependency metadata, and recycle-bin workflows;
+- project/version pinning with engine-aware export destinations;
+- drift detection, pinned-file repair, and explicit update-to-latest workflows;
+- built-in license presets, asset-level license assessment, project-wide reports, and generated attribution files;
+- local Ollama semantic embeddings with hybrid semantic + keyword search and offline keyword fallback;
+- verified backups with SHA-256 manifests and optional replication targets;
+- hot/archive storage tiers with verified movement and transparent read access;
+- authenticated Administrator / Developer / Read-only roles;
+- asset check-out/check-in and server-enforced collaboration locks;
+- append-only activity/audit history with searchable filters and export;
+- directional relationships for variants, derivatives, LODs, collisions, materials, textures, animations, engine exports, and references.
 
-Earlier revisions of DragonForge Asset Vault were published with an MIT license declaration. Rights validly granted under the MIT License for those historical versions are not revoked by the current repository licensing change. The current repository state uses the proprietary notice; it does not purport to withdraw rights already granted for copies released under the earlier MIT terms.
+## Desktop workflow
 
-## Current milestone
+The client uses a three-region layout:
 
-**Phase 18 — Asset Relationships, Variants & Derivatives**
-
-### Server
-
-- LAN HTTP API
-- SQLite catalog
-- content-addressed filesystem storage
-- streaming uploads/downloads
-- SHA-256 duplicate-aware storage
-- categories and tags
-- recycle bin
-- image and 3D previews
-- immutable asset revision history
-- ZIP package import
-- package/dependency manifests
-- project/version pinning
-- canonical license presets
-- asset license assessment
-- project-wide license reports
-- generated attribution text and CSV/JSON manifest data
-- persistent action logs
-- local Ollama semantic embedding index
-- hybrid semantic + keyword search with offline fallback
-- verified vault snapshots with SHA-256 manifests
-- configurable retention and replication targets
-- engine-aware project export presets for Godot, Unity, Unreal, Roblox/Rojo, Minecraft Bedrock, and Generic projects
-- project drift detection, pinned-file repair, and explicit update-to-latest workflows
-- trusted-LAN asset checkout/check-in ownership
-- server-enforced mutation locks for checked-out assets
-- verified hot/archive storage tier transitions
-- transparent reads, previews, downloads, versions, and project exports from archived assets
-- archive-aware verified backups
-- optional API-token authentication
-- Administrator / Developer / Read-only role enforcement
-- server-side user management with token hashing
-- authenticated checkout ownership
-- append-only authenticated audit trail
-- searchable activity history with user/action/target/result/date filters
-- Administrator JSON/CSV audit export
-- role-aware desktop controls that reflect server permissions
-
-### Desktop client
-
-- native Windows-first UI
-- single-file and package imports
-- package/dependency viewer
-- Version History
-- project export
-- safe **Remove from Project** for single assets and packages
-- license preset selector
-- license health badges
-- license-status filter
-- attribution warnings
-- automatic `CREDITS.txt`
-- automatic JSON and CSV license manifests
-- confirmation + rollback-aware project asset removal
-- manual **Refresh Credits / License Manifest**
-- Smart / Keyword search modes
-- AI index status and one-click reindex
-- one-click Create Backup / Verify Latest controls
-- engine-specific project destinations
-- Check Project Sync / Repair Pinned Files / Update Project to Latest controls
-- asset Check Out / Check In controls with holder/workstation status
-- per-asset HOT/ARCHIVE status with Archive Asset / Recall to Hot Storage controls
-- persistent daily logs
-- masked API token configuration
-- authenticated user/role display
-- Administrator user-management window
-- Activity window and per-asset activity shortcut
-- Administrator JSON + CSV activity export
-- role-aware disabled mutation controls for Read-only users
-- modern sidebar navigation and dedicated application views
-- password-manager-inspired three-column asset workflow
-- fixed-width searchable asset list instead of the Phase 16 card grid
-- large asset detail/preview workspace
-- orange-accent DragonForge visual system
-- project-scoped asset browsing with pinned-version/path status
-- per-project asset counts and sidebar quick links
-- per-asset update-to-latest from project view
-- directional asset relationship graph for variants, derivatives, exports, LODs, collisions, textures, materials, animations, engine exports, and references
-- relationship lineage shown directly in the asset detail workspace
-- dedicated Projects, Activity, Backups, AI Search, Users, and Settings pages
-- persistent theme, UI scale, card size, and layout preferences
-
-See `docs/PHASE_1.md` through `docs/PHASE_16.md`.
-
-## Quick start
-
-```powershell
-cargo run --release --bin dragonforge-server
+```text
+Navigation sidebar | Searchable asset list | Asset detail workspace
 ```
 
-Then:
+The main views cover Assets, Recycle Bin, Projects, Activity, Backups, AI Search, Users, and Settings. Project-scoped browsing keeps the normal asset detail workspace while showing pinned version, current/latest revision state, and export path for each project asset.
 
-```powershell
-cargo run --release --bin dragonforge-client
-```
+Read-only users can inspect assets, versions, previews, project state, activity, and relationships without being presented with mutation controls they are not authorized to use. Server-side authorization remains authoritative.
 
-## Phase 8 project output
+## Project integration and attribution
 
-When licensed assets are registered to a project, DragonForge maintains:
+When licensed assets are registered to a project, Asset Vault can maintain:
 
 ```text
 <Project>/
 ├── CREDITS.txt
 ├── DragonForge-License-Manifest.json
 ├── DragonForge-License-Manifest.csv
-└── DragonForgeAssets/
+└── <engine-specific asset directory>/
 ```
 
-Current built-in license presets:
+Built-in project presets include Generic, Godot, Unity, Unreal Engine, Roblox/Rojo, and Minecraft Bedrock. Project pins preserve the selected asset revision until an explicit update is requested.
 
-```text
-CC0-1.0
-CC-BY-4.0
-Custom
-Unknown
+License presets currently include `CC0-1.0`, `CC-BY-4.0`, `Custom`, and `Unknown`. Custom or site-specific licenses remain marked for manual review rather than being automatically interpreted as legally compatible.
+
+Asset Vault helps track license information and generate attribution material; it is not a legal-license compatibility oracle.
+
+## Architecture
+
+The application consists of a Rust LAN server and native desktop client backed by SQLite and filesystem storage.
+
+The server owns asset metadata, revisions, hashes, authorization, checkouts, audit history, project state, backup/catalog operations, and the storage-tier rules. Binary data is stored on the filesystem while catalog and workflow state are persisted in SQLite.
+
+Optional AI search uses a local Ollama service, defaulting to `http://127.0.0.1:11434` with `nomic-embed-text`. Smart Search falls back to keyword ranking when Ollama is unavailable.
+
+The live vault data directory, database, previews, asset binaries, backups, and client/server logs are runtime data and are not intended to live in Git.
+
+## Quick start
+
+Start the server:
+
+```powershell
+cargo run --release --bin dragonforge-server
 ```
 
-Custom/site-specific licenses remain marked for manual review rather than being interpreted automatically.
+Then start the desktop client:
 
-## Logs
-
-Server:
-
-```text
-<storage.data_dir>/logs/
+```powershell
+cargo run --release --bin dragonforge-client
 ```
 
-Windows client:
-
-```text
-%APPDATA%\DragonForge\AssetVault\logs\
-```
-
-Vault binaries, package files, historical revisions, previews, database data, and logs are not stored in GitHub.
-
-
-## Phase 9 AI search setup
-
-DragonForge defaults to local Ollama at `http://127.0.0.1:11434` with the `nomic-embed-text` embedding model.
+For AI-assisted search, install Ollama separately and pull the configured embedding model, for example:
 
 ```powershell
 ollama pull nomic-embed-text
 ```
 
-Then start DragonForge and click **Reindex AI Search** in the desktop client.
+Then use **Reindex AI Search** from the desktop client.
 
-Smart Search automatically falls back to keyword ranking if Ollama is unavailable. See `docs/PHASE_9.md` and `DragonForge.example.toml` for configuration.
+Configuration examples are available in [`DragonForge.example.toml`](DragonForge.example.toml). Keep live tokens, databases, backup data, and runtime storage outside the tracked repository.
 
+## Security and operating boundaries
 
-## Phase 10 backup setup
+Asset Vault is designed primarily for trusted LAN/self-hosted workflows. Authentication and role enforcement strengthen that model, but operators should still treat the server, storage roots, backups, and administrator tokens as sensitive infrastructure.
 
-By default, DragonForge writes verified backups to `./backups` and keeps the 10 newest snapshots.
+- API-token authentication is optional and should use long random tokens when enabled.
+- Only token hashes are stored in SQLite, but clients still need to protect their configured token.
+- Archive and backup destinations must remain outside the live data directory.
+- Check-out ownership prevents conflicting mutations but is not a distributed source-control replacement.
+- Semantic search depends on the locally configured model/service; AI results are search aids, not authoritative metadata.
+- License/attribution features organize project information but do not replace human/legal review of uncertain licenses.
+- The project is still an actively developed engineering tool rather than a formally audited enterprise content-management system.
 
-A backup contains:
+## Documentation
 
-```text
-dragonforge-<timestamp>/
-├── manifest.json
-├── database/
-│   └── dragonforge.db
-├── assets/
-└── previews/
-```
+- [`docs/`](docs/) — complete phase-by-phase engineering and validation history
+- [Phase 16 desktop redesign](docs/PHASE_16.md) — modern client shell and workspace organization
+- [Third-party notices](THIRD_PARTY_NOTICES.md) — dependency/license review requirements
+- [License](LICENSE) — current DragonForge proprietary source notice
+- [Contribution policy](CONTRIBUTING.md) — current external-contribution boundary
 
-Every manifest entry contains a SHA-256 hash and byte size. Backups are verified after creation before they are considered complete.
+The detailed Phase 1–18.2 implementation record remains under `docs/`; this README focuses on the current product and evaluation path rather than repeating the build diary.
 
-Optional replication targets can be configured in `DragonForge.toml`:
+## Publication and dependency limitations
 
-```toml
-[backup]
-directory = "./backups"
-keep = 10
-replication_targets = ["D:/DragonForge-Backup"]
-```
+The current DragonForge source is proprietary/source-visible. Earlier copies validly distributed under the repository's former MIT license retain the rights granted to those copies; the current licensing change does not revoke historical grants.
 
-The backup directory must be outside the live DragonForge data directory.
+The repository did not contain a committed `Cargo.lock` at the Phase 3 public-readiness audit. Before public binary distribution, the exact Cargo dependency graph still needs to be frozen and its complete transitive license metadata reviewed. This README does not imply that publication gate has been resolved.
 
+## Licensing
 
-## Phase 11 engine-aware project workflow
+Copyright © 2026 David James. All rights reserved.
 
-Project engine presets now determine the default DragonForge export folder:
+Original DragonForge material in this repository is **source-visible, not open source**. Except for rights expressly required by GitHub's Terms of Service for public repositories, no general permission is granted to use, copy, modify, redistribute, sublicense, sell, commercially exploit, or incorporate original DragonForge material into another work.
 
-| Engine | Export destination |
-| --- | --- |
-| Generic | `DragonForgeAssets` |
-| Godot | `assets/dragonforge` |
-| Unity | `Assets/DragonForge` |
-| Unreal Engine | `Content/DragonForge` |
-| Roblox / Rojo | `src/DragonForgeAssets` |
-| Minecraft Bedrock | `DragonForgeAssets` |
-
-Existing pre-Phase-11 project links under `DragonForgeAssets` remain supported.
-
-Use **Check Project Sync** to verify exported files against the vault using SHA-256. **Repair Pinned Files** restores the exact versions already pinned to the project without upgrading them. **Update Project to Latest** is the explicit action that advances project pins to the current vault revisions.
-
-
-## Phase 11.1 maintenance
-
-Engine-aware **Remove from Project** now immediately regenerates `CREDITS.txt`, `DragonForge-License-Manifest.json`, and `DragonForge-License-Manifest.csv` after a successful project unlink. A manifest-write failure is reported without undoing the already-successful removal.
-
-
-## Phase 12 collaboration locks
-
-DragonForge desktop clients identify themselves using:
-
-```text
-<WindowsUser>@<ComputerName>
-```
-
-with `DRAGONFORGE_USER` and `DRAGONFORGE_WORKSTATION` environment-variable overrides when needed.
-
-A checked-out asset is protected from mutating requests originating from another client identity. Protected operations include metadata edits, new single-file/package revisions, version restores, soft delete, and restore.
-
-Unlocked assets remain editable for backward compatibility. Phase 12 is still a trusted-LAN collaboration system, not an authentication boundary.
-
-
-## Phase 12.1 UI maintenance
-
-The Asset Details side panel is now vertically scrollable. This keeps checkout/check-in controls, metadata actions, version controls, project actions, and removal controls accessible on smaller windows and lower-resolution displays.
-
-
-## Phase 14 storage tiers
-
-Phase 14 adds an optional archive tier for large or infrequently edited source assets. Configure it in `DragonForge.toml`:
-
-```toml
-[storage]
-data_dir = "./data"
-archive_dir = "D:/DragonForge-Archive"
-```
-
-The archive directory must be outside the live data directory.
-
-Archiving copies every binary referenced by the asset—including historical revisions and package files—to the archive tier, verifies SHA-256 before changing catalog paths, and removes an old hot copy only when no remaining catalog reference still points to it. **Recall to Hot Storage** performs the inverse operation.
-
-All existing read paths resolve archived content transparently, so previews, downloads, version history downloads, package files, and project export continue to work while an asset is archived.
-
-Phase 10 backups now include configured archive-tier binaries under `archive/assets/`.
-
-
-## Phase 13 authentication and roles
-
-Phase 13 can be enabled in `DragonForge.toml`:
-
-```toml
-[auth]
-enabled = true
-bootstrap_admin_user = "admin"
-bootstrap_admin_token = "replace-with-a-long-random-token"
-```
-
-On the first authenticated startup, if the user table is empty, DragonForge creates the bootstrap Administrator. The bootstrap token must be at least 16 characters. Only a SHA-256 token hash is stored in SQLite.
-
-Roles:
-
-| Role | Access |
-| --- | --- |
-| Administrator | Full access, user management, backup mutations |
-| Developer | Read access plus normal asset/project/check-out/storage mutations |
-| Read-only | GET/HEAD access only |
-
-The public health endpoint remains available so clients can discover whether authentication is enabled. All other API routes require `Authorization: Bearer <token>` when Phase 13 auth is enabled.
-
-The desktop client stores its configured API token in the local client settings file and masks it in the UI. `DRAGONFORGE_API_TOKEN` may be used as an environment-variable override.
-
-Phase 12 checkout ownership is now bound to the authenticated username on the server; the client cannot spoof another checkout holder by changing `X-DragonForge-User`.
-
-
-## Phase 13.1 checkout identity maintenance
-
-When authentication is enabled, the desktop client now uses the authenticated DragonForge username—not the local Windows username—to determine whether the selected checkout belongs to the current user. This fixes a case where a Developer could successfully check out an asset but the **Check In** button was hidden when the DragonForge username differed from the Windows account name.
-
-
-## Phase 15 audit trail and activity
-
-Phase 15 records API activity in an append-only SQLite audit table. Events include timestamp, authenticated user, role, workstation, action, HTTP method/path, target type/id, success/failure, status code, and safe detail text.
-
-The desktop **Activity** window supports filtering by user, action, result, target type/id, and RFC3339 date range. Administrators can export the filtered result set to JSON and CSV.
-
-Non-Administrator users can inspect their own activity. Administrators can inspect vault-wide activity.
-
-Read-only users now see mutating desktop controls disabled instead of being invited to click operations that the server will reject with HTTP 403. Server-side authorization remains authoritative.
-
-
-## Phase 16 modern desktop UI
-
-Phase 16 reorganizes the native desktop client around a modern three-region shell:
-
-```text
-Navigation sidebar | Main workspace | Contextual Inspector
-```
-
-The sidebar now separates Library, Workspace, and System destinations instead of keeping every control in the top toolbar.
-
-Dedicated views:
-
-```text
-Assets
-Recycle Bin
-Projects
-Activity
-Backups
-AI Search
-Users (Administrator)
-Settings
-```
-
-The Asset Library now uses an adaptive card grid that responds to available width and a redesigned Inspector with collapsible General, Collaboration, Versions & Package, Project, Storage, and Actions sections.
-
-Appearance/layout preferences are persisted in the existing client settings JSON, including dark/light mode, UI scale, asset card width, sidebar width, inspector width, filter visibility, and last active view.
-
-
-## Phase 16.1 visual redesign
-
-Phase 16.1 replaces the Phase 16 card-grid presentation with a visual layout modeled on the established DragonForge Password Manager design language.
-
-The Assets view now uses:
-
-```text
-Brand/navigation sidebar | Searchable asset list | Large asset detail workspace
-```
-
-The left navigation uses a DragonForge logo block, a prominent orange **Add Asset** action, grouped navigation, and a bottom connection/account card.
-
-The middle asset browser is intentionally fixed-width and list-oriented so names and metadata no longer collapse into narrow wrapped columns.
-
-The right workspace provides a large preview, primary actions, and clearly separated General, Tags, Collaboration, Storage, Project, and More sections.
-
-The dark theme uses a blue-black base, raised panels, muted blue-gray secondary text, and a restrained orange accent derived from the password-manager reference.
-
-
-## Phase 16.2 project asset browser
-
-Projects can now be opened directly in the normal three-column asset workflow.
-
-Use **Projects → Browse Assets**, or a project quick link in the left sidebar, to switch the asset list into a project-scoped mode.
-
-Project asset rows show:
-
-```text
-Pinned vN · Latest vN · CURRENT/OUTDATED · exported/relative/path
-```
-
-The normal large asset detail workspace remains available while browsing a project.
-
-When a project pin is behind the current vault revision, the detail pane offers **Update This Asset to Latest** for Developer/Administrator users. Existing safe **Remove from Project** behavior also works directly from the project-scoped browser.
-
-Read-only users may browse project assets, pinned versions, paths, previews, downloads, versions, and activity, but project mutations remain disabled and server-enforced.
-
-
-## Phase 18 asset relationships, variants, and derivatives
-
-Phase 18 adds an explicit graph between otherwise independent vault assets.
-
-Supported relationship types:
-
-```text
-Variant
-Derivative
-Export
-LOD
-Collision
-Texture
-Material
-Animation
-Engine Export
-Reference
-```
-
-Relationships are directional. The asset where the link is created is the source/base side and the chosen related asset is the outgoing side. When viewing the other asset, the same link appears as incoming.
-
-The Phase 16.1 Asset Details workspace now includes a **RELATIONSHIPS** section. It shows both incoming and outgoing links, optional labels/notes, deleted/recycle-bin status, and actions to open or unlink a related asset.
-
-Developer/Administrator users can use **+ Add Relationship** to search active vault assets and create a typed link. Read-only users can inspect lineage but cannot modify it.
-
-Relationship records are independent of binary revisions and project membership, so updating an asset version does not break its lineage. They are stored in SQLite and are automatically preserved by Phase 10 backups.
-
-Phase 15 audit history records relationship create/update/delete actions.
-
-
-## Phase 18.1 maintenance
-
-Phase 18.1 fixes the initial Phase 18 compile break found by local Windows validation:
-
-- restores the missing `AssetRow` import in `src/db.rs`
-- fixes malformed escaped JSON string literals in the Phase 18 relationship serialization tests
-
-No Phase 18 behavior or API contract changes are introduced by this maintenance release.
-
-
-## Phase 18.2 maintenance
-
-Phase 18.2 improves runtime validation and corrects stale client milestone metadata:
-
-- client startup logs now report Phase 18 instead of the old Phase 16.1 label
-- relationship refreshes log asset ID and incoming/outgoing/total counts
-- opening the relationship editor is logged
-- relationship creation logs source asset, related asset, relationship ID, and type
-- related-asset navigation is logged
-- relationship removal logs both asset ID and relationship ID
-
-This maintenance release does not change the Phase 18 relationship API or database schema.
+See [LICENSE](LICENSE) for the full notice. Third-party components retain their own licenses and rights; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
