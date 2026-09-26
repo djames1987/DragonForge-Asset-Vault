@@ -1,5 +1,9 @@
 # DragonForge Asset Vault
 
+<p align="center">
+  <img src="docs/assets/readme/phase-05-hero.svg" alt="DragonForge Asset Vault banner showing the desktop client connected to a LAN server, SQLite metadata, and asset storage" width="100%">
+</p>
+
 DragonForge Asset Vault is a Windows-first, LAN-oriented asset manager for game-development teams and solo projects. It combines source-asset storage, revision history, license/attribution tracking, project pinning, collaboration controls, backups, archive tiers, and AI-assisted search in one desktop workflow.
 
 > **Status:** Phase 18.2 maintenance baseline. The current implementation includes relationship/lineage tracking between assets in addition to the earlier versioning, project, search, collaboration, storage, and audit features.
@@ -37,6 +41,22 @@ Navigation sidebar | Searchable asset list | Asset detail workspace
 The main views cover Assets, Recycle Bin, Projects, Activity, Backups, AI Search, Users, and Settings. Project-scoped browsing keeps the normal asset detail workspace while showing pinned version, current/latest revision state, and export path for each project asset.
 
 Read-only users can inspect assets, versions, previews, project state, activity, and relationships without being presented with mutation controls they are not authorized to use. Server-side authorization remains authoritative.
+
+### Workflow at a glance
+
+```mermaid
+flowchart LR
+    Client[Desktop client] --> Server[LAN server]
+    Server --> Meta[SQLite metadata / workflow state]
+    Server --> Store[Content-addressed asset storage]
+    Server --> Backup[Verified backup / archive tiers]
+    Client --> Project[Project pins / exports / attribution]
+    Search[Optional local Ollama embeddings] --> Server
+```
+
+### Screenshots
+
+The current repository does not contain a dedicated public screenshot pack, and the connector environment cannot run the real desktop/server stack. No screenshot is fabricated. The required synthetic asset-library, detail, project, and optional AI-search captures are defined in [Public Screenshot Capture](docs/PUBLIC_SCREENSHOT_CAPTURE.md).
 
 ## Project integration and attribution
 
@@ -106,6 +126,7 @@ Asset Vault is designed primarily for trusted LAN/self-hosted workflows. Authent
 
 - [`docs/`](docs/) — complete phase-by-phase engineering and validation history
 - [Phase 16 desktop redesign](docs/PHASE_16.md) — modern client shell and workspace organization
+- [Public Screenshot Capture](docs/PUBLIC_SCREENSHOT_CAPTURE.md) — synthetic/demo asset capture and sanitization rules
 - [Third-party notices](THIRD_PARTY_NOTICES.md) — dependency/license review requirements
 - [License](LICENSE) — current DragonForge proprietary source notice
 - [Contribution policy](CONTRIBUTING.md) — current external-contribution boundary
