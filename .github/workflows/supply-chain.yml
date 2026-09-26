@@ -1,0 +1,32 @@
+name: Supply Chain Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 9 * * 1"
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/dependabot.yml"
+      - ".github/workflows/supply-chain.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/dependabot.yml"
+      - ".github/workflows/supply-chain.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rustsec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit locked dependencies
+        run: cargo audit
