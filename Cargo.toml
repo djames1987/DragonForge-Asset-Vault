@@ -11,7 +11,7 @@ anyhow = "1.0"
 base64 = "0.22"
 axum = { version = "0.7", features = ["multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
-eframe = "0.31"
+eframe = "0.36"
 hex = "0.4"
 gltf = "1.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
