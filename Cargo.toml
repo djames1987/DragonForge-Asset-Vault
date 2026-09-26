@@ -4,7 +4,7 @@ version = "0.18.2"
 edition = "2021"
 autobins = false
 description = "LAN-first game asset storage vault"
-license = "MIT"
+license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1.0"
