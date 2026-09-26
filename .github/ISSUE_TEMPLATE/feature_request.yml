@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest a non-security Asset Vault improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature discussion is welcome, but unsolicited code, artwork, models, textures, or other copyrightable implementation material is not currently accepted.
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Problem or workflow
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Desired behavior
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints or alternatives
+      description: Do not include confidential project or asset information.
