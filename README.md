@@ -2,6 +2,18 @@
 
 DragonForge Asset Vault is a LAN-first game-development asset manager for source assets, metadata, hashes, previews, revision history, multi-file packages, dependencies, projects, and license/attribution tracking.
 
+## License
+
+Copyright © 2026 David James. All rights reserved.
+
+The current DragonForge Asset Vault source is source-visible for evaluation, portfolio review, security review, and reference, but it is **not open source**. Except for rights expressly required by GitHub's Terms of Service for public repositories, no general license is granted to use, copy, modify, redistribute, sublicense, sell, commercially exploit, or incorporate original DragonForge material into another work.
+
+See [LICENSE](LICENSE). Third-party components retain their independent licenses and rights.
+
+### Historical MIT-licensed versions
+
+Earlier revisions of DragonForge Asset Vault were published with an MIT license declaration. Rights validly granted under the MIT License for those historical versions are not revoked by the current repository licensing change. The current repository state uses the proprietary notice; it does not purport to withdraw rights already granted for copies released under the earlier MIT terms.
+
 ## Current milestone
 
 **Phase 18 — Asset Relationships, Variants & Derivatives**
